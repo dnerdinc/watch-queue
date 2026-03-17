@@ -88,47 +88,31 @@ async function fetchWatchProviders(filmTitle) {
     const title = cleanTitle(filmTitle);
     const year = extractYear(filmTitle);
     const yearParam = year ? `&year=${year}` : "";
+    // Search for the movie ID
     const sr = await fetch(`https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(title)}&language=en-US&page=1${yearParam}`,{headers});
     const sd = await sr.json();
     const movieId = sd.results?.[0]?.id;
     if (!movieId) return null;
+    // Fetch watch providers for US
     const wr = await fetch(`https://api.themoviedb.org/3/movie/${movieId}/watch/providers`,{headers});
     const wd = await wr.json();
     const usProviders = wd.results?.US;
+    // Always build a JustWatch link — use TMDB's link if available, else construct one
     const jwLink = usProviders?.link || `https://www.justwatch.com/us/search?q=${encodeURIComponent(cleanTitle(filmTitle))}`;
     if (!usProviders) return { jwLink, platforms: {} };
-
+    // flatrate = subscription, free = free with ads, ads = ad-supported
     const allProviders = [
       ...(usProviders.flatrate || []),
       ...(usProviders.free || []),
       ...(usProviders.ads || []),
     ];
+    // Deduplicate by provider_id
     const seen = new Set();
     const providers = allProviders.filter(p => { if(seen.has(p.provider_id)) return false; seen.add(p.provider_id); return true; });
-
-    // Per-platform direct search URLs
-    const query = encodeURIComponent(title);
-    const PLATFORM_URLS = {
-      netflix:   `https://www.netflix.com/search?q=${query}`,
-      prime:     `https://www.amazon.com/s?k=${query}&i=instant-video`,
-      disney:    `https://www.disneyplus.com/search/${query}`,
-      hulu:      `https://www.hulu.com/search?q=${query}`,
-      appletv:   `https://tv.apple.com/search?term=${query}`,
-      peacock:   `https://www.peacocktv.com/find-something-to-watch?q=${query}`,
-      paramount: `https://www.paramountplus.com/search/?query=${query}`,
-      max:       `https://www.max.com/search#q=${encodeURIComponent(title)}`,
-      tubi:      `https://tubitv.com/search?q=${query}`,
-      plex:      `https://app.plex.tv/desktop/#!/search?query=${query}`,
-      kanopy:    `https://www.kanopy.com/search?q=${query}`,
-      hoopla:    `https://www.hoopladigital.com/search?q=${query}&type=movie`,
-    };
-
     const links = {};
     providers.forEach(p => {
       const platformId = TMDB_PROVIDER_MAP[p.provider_id];
-      if (platformId && PLATFORM_URLS[platformId]) {
-        links[platformId] = PLATFORM_URLS[platformId];
-      }
+      if (platformId) links[platformId] = jwLink;
     });
     return { jwLink, platforms: links };
   } catch(_){
