@@ -640,7 +640,8 @@ function FilmModal({ film, isWatched, note, rating, streamingLinks, friendsWatch
   },[onClose]);
 
   const ytUrl=`https://www.youtube.com/results?search_query=${encodeURIComponent(film.yt||film.t+" trailer")}`;
-  const mergedLinks = { ...autoProviders, ...(streamingLinks||{}) };
+  // Platform buttons always use fresh autoProviders (direct links), only custom key uses saved value
+  const mergedLinks = { ...autoProviders, ...(streamingLinks?.custom ? { custom: streamingLinks.custom } : {}) };
   const linksWithTitle = { ...mergedLinks, _title: film.t };
 
   return(
@@ -1313,24 +1314,34 @@ export default function App() {
 
   useEffect(()=>{
     if(!user) return;
-    loadUserData();loadFriendsData();loadFeed();
+    loadUserData();loadSharedFilms();loadFriendsData();loadFeed();
     const ch=supabase.channel("wq-rt")
       .on("postgres_changes",{event:"*",schema:"public",table:"user_films"},()=>{loadFriendsData();loadFeed();})
       .on("postgres_changes",{event:"*",schema:"public",table:"activity_feed"},()=>loadFeed())
+      .on("postgres_changes",{event:"*",schema:"public",table:"shared_films"},()=>loadSharedFilms())
       .subscribe();
     return()=>supabase.removeChannel(ch);
   },[user]);
 
+  async function loadSharedFilms(){
+    const{data}=await supabase.from("shared_films").select("*").order("created_at",{ascending:true});
+    if(!data) return;
+    const films=data.map(row=>({
+      t:row.film_title, e:row.emoji||"🎬", s:row.summary||"",
+      tags:row.tags||[], yt:row.yt||"",
+      posterUrl:(row.poster_url&&!row.poster_url.includes("wikipedia")&&!row.poster_url.includes("wikimedia"))?row.poster_url:"",
+      note:"", _custom:true, _sharedId:row.id, _addedBy:row.added_by, _addedByName:row.added_by_name,
+    }));
+    setCustomFilms(films);
+  }
+
   async function loadUserData(){
     const{data}=await supabase.from("user_films").select("*").eq("user_id",user.id);
     if(!data) return;
-    const w={},n={},r={},sl={},custom=[],hidden={},orderMap={},wt={};
+    const w={},n={},r={},sl={},hidden={},orderMap={},wt={};
     data.forEach(row=>{
       if(row.hidden) hidden[row.film_title]=true;
-      else if(row.is_custom){
-        const posterUrl=(row.poster_url&&!row.poster_url.includes("wikipedia")&&!row.poster_url.includes("wikimedia"))?row.poster_url:"";
-        custom.push({t:row.film_title,e:row.emoji||"🎬",s:row.summary||"",tags:row.tags||[],yt:row.yt||"",posterUrl,note:row.note||"",_custom:true});
-      } else {
+      else {
         if(row.watched)w[row.film_title]=true;
         if(row.note)n[row.film_title]=row.note;
         if(row.rating)r[row.film_title]=row.rating;
@@ -1339,7 +1350,7 @@ export default function App() {
       if(row.sort_order!=null)orderMap[row.film_title]=row.sort_order;
       if(row.watch_together)wt[row.film_title]=true;
     });
-    setWatched(w);setNotes(n);setRatings(r);setStreamingLinks(sl);setCustomFilms(custom);setHiddenFilms(hidden);setWatchTogether(wt);
+    setWatched(w);setNotes(n);setRatings(r);setStreamingLinks(sl);setHiddenFilms(hidden);setWatchTogether(wt);
 
     // Load shared custom URLs from ALL users
     const{data:allShared}=await supabase.from("user_films").select("film_title,shared_custom_url").not("shared_custom_url","is",null);
@@ -1347,20 +1358,12 @@ export default function App() {
     (allShared||[]).forEach(row=>{ if(row.shared_custom_url) scu[row.film_title]=row.shared_custom_url; });
     setSharedCustomUrls(scu);
 
-    // Build order from sort_order values
-    const allTitles=[...FILMS.filter(f=>!hidden[f.t]).map(f=>f.t),...custom.map(f=>f.t)];
-    const sorted=allTitles.sort((a,b)=>(orderMap[a]??9999)-(orderMap[b]??9999));
+    // Build order from sort_order values — shared films will be appended after
+    const coreTitles=FILMS.filter(f=>!hidden[f.t]).map(f=>f.t);
+    const sorted=coreTitles.sort((a,b)=>(orderMap[a]??9999)-(orderMap[b]??9999));
     setFilmOrder(sorted);
 
-    // Re-fetch TMDB poster for custom films missing one
-    const needsPoster=custom.filter(f=>!f.posterUrl);
-    for(const film of needsPoster){
-      const src=await fetchTMDBPoster(film.t,"w300");
-      if(src){
-        setCustomFilms(cf=>cf.map(f=>f.t===film.t?{...f,posterUrl:src}:f));
-        await supabase.from("user_films").update({poster_url:src}).eq("user_id",user.id).eq("film_title",film.t);
-      }
-    }
+    // Re-fetch TMDB poster for custom films missing one (handled separately in loadSharedFilms)
   }
 
   async function loadFriendsData(){
@@ -1446,8 +1449,13 @@ export default function App() {
 
   async function removeFilm(film){
     if(film._custom){
+      // Only the person who added it can remove it from shared_films
+      if(film._addedBy && film._addedBy !== user.id){
+        showToast("Only the person who added this can remove it");
+        return;
+      }
       setCustomFilms(cf=>cf.filter(f=>f.t!==film.t));
-      await supabase.from("user_films").delete().eq("user_id",user.id).eq("film_title",film.t);
+      await supabase.from("shared_films").delete().eq("film_title",film.t);
     } else {
       await supabase.from("user_films").upsert({user_id:user.id,film_title:film.t,hidden:true},{onConflict:"user_id,film_title"});
       setHiddenFilms(h=>({...h,[film.t]:true}));
@@ -1511,13 +1519,16 @@ export default function App() {
     if(s.length>220)s=s.slice(0,217)+"…";
     const tmdbPoster=await fetchTMDBPoster(page.title,"w300");
     const posterUrl=tmdbPoster||page.thumbnail?.source?.replace(/\/\d+px-/,"/300px-")||"";
-    const newFilm={t:page.title,e:"🎬",s,tags:[],yt:page.title+" official trailer",posterUrl,note:"",_custom:true};
-    setCustomFilms(cf=>[...cf,newFilm]);
-    setFilmOrder(o=>[...o,page.title]);
-    const{error}=await supabase.from("user_films").upsert({user_id:user.id,film_title:page.title,is_custom:true,emoji:"🎬",summary:s,poster_url:posterUrl,yt:page.title+" official trailer"},{onConflict:"user_id,film_title"});
-    if(error)console.error("upsert failed:",error);
-    await supabase.from("activity_feed").insert({user_id:user.id,display_name:user.user_metadata?.display_name||"someone",film_title:page.title,action:"added"});
-    showToast(`"${page.title}" added! 🎬`);
+    const dName=user.user_metadata?.display_name||user.email?.split("@")[0]||"someone";
+    // Save to shared_films so ALL users see it
+    const{error}=await supabase.from("shared_films").upsert({
+      added_by:user.id, added_by_name:dName,
+      film_title:page.title, emoji:"🎬", summary:s,
+      poster_url:posterUrl, yt:page.title+" official trailer", tags:[]
+    },{onConflict:"film_title"});
+    if(error){ console.error("shared_films upsert failed:",error); showToast("Could not add film"); return; }
+    await supabase.from("activity_feed").insert({user_id:user.id,display_name:dName,film_title:page.title,action:"added"});
+    showToast(`"${page.title}" added for everyone! 🎬`);
   }
 
   async function signOut(){await supabase.auth.signOut();setWatched({});setNotes({});setRatings({});setCustomFilms([]);}
@@ -1526,7 +1537,7 @@ export default function App() {
 
   const allFilmsMap = Object.fromEntries([...FILMS,...customFilms].map(f=>[f.t,f]));
   const allFilms = filmOrder.length
-    ? filmOrder.map(t=>allFilmsMap[t]).filter(Boolean)
+    ? [...filmOrder.map(t=>allFilmsMap[t]).filter(Boolean), ...customFilms.filter(f=>!filmOrder.includes(f.t))]
     : [...FILMS.filter(f=>!hiddenFilms[f.t]),...customFilms];
 
   const gridCols = gridSize==="sm"?"repeat(auto-fill,minmax(90px,1fr))":gridSize==="lg"?"repeat(auto-fill,minmax(180px,1fr))":"repeat(auto-fill,minmax(130px,1fr))";
@@ -1829,7 +1840,7 @@ export default function App() {
           rating={ratings[selectedFilm.t]||0}
           streamingLinks={streamingLinks[selectedFilm.t]||{}}
           friendsWatched={friendsData[selectedFilm.t]||[]}
-          isCustom={!!selectedFilm._custom}
+          isCustom={!!selectedFilm._custom && (!selectedFilm._addedBy || selectedFilm._addedBy === user.id)}
           currentUser={user}
           darkMode={darkMode}
           watchTogether={!!watchTogether[selectedFilm.t]}
