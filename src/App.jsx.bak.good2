@@ -611,7 +611,7 @@ function PosterTile({ film, isWatched, friendsWatched, rating, streamingLinks, o
 }
 
 // ── FILM MODAL ────────────────────────────────
-function FilmModal({ film, isWatched, note, rating, streamingLinks, friendsWatched, friendsRatings, onToggle, onNoteChange, onRatingChange, onStreamingChange, onDelete, onClose, isCustom, currentUser, darkMode, watchTogether, onWatchTogetherChange, sharedCustomUrl, onSharedCustomUrlChange }) {
+function FilmModal({ film, isWatched, note, rating, streamingLinks, friendsWatched, onToggle, onNoteChange, onRatingChange, onStreamingChange, onDelete, onClose, isCustom, currentUser, darkMode, watchTogether, onWatchTogetherChange, sharedCustomUrl, onSharedCustomUrlChange }) {
   const [localNote,setLocalNote]=useState(note||"");
   const [posterSrc,setPosterSrc]=useState(film.posterUrl||null);
   const [posterLoaded,setPosterLoaded]=useState(false);
@@ -736,32 +736,13 @@ function FilmModal({ film, isWatched, note, rating, streamingLinks, friendsWatch
             </div>
           </div>
 
-          {/* Your Rating */}
+          {/* Rating */}
           <div>
             <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.15em",color:"#4a4a5e",textTransform:"uppercase",marginBottom:7}}>Your Rating</div>
             <div style={{display:"flex",gap:4}}>
               {[1,2,3,4,5].map(n=>(<button key={n} onClick={()=>onRatingChange(n===rating?0:n)} style={{background:"none",border:"none",cursor:"pointer",padding:0,fontSize:"1.4rem",color:n<=rating?"#f5c518":"#222232",transition:"all 0.15s",transform:n<=rating?"scale(1.12)":"scale(1)"}}>★</button>))}
             </div>
           </div>
-
-          {/* Friends' Ratings */}
-          {friendsRatings?.length>0&&(
-            <div>
-              <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.15em",color:"#4a4a5e",textTransform:"uppercase",marginBottom:8}}>Friends' Ratings</div>
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {friendsRatings.map((fr,i)=>(
-                  <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                    <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.65rem",color:"#ede0cc"}}>{fr.name}</span>
-                    <div style={{display:"flex",gap:2}}>
-                      {[1,2,3,4,5].map(n=>(
-                        <span key={n} style={{fontSize:"0.9rem",color:n<=fr.rating?"#f5c518":"#222232"}}>★</span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Notes */}
           <div>
@@ -1289,7 +1270,6 @@ export default function App() {
   const [streamingLinks,setStreamingLinks]=useState({});
   const [customFilms,setCustomFilms]=useState([]);
   const [friendsData,setFriendsData]=useState({});
-  const [friendsRatings,setFriendsRatings]=useState({});
   const [feed,setFeed]=useState([]);
   const [toast,setToast]=useState(null);
   const [selectedFilm,setSelectedFilm]=useState(null);
@@ -1303,7 +1283,6 @@ export default function App() {
   const [dragIndex,setDragIndex]=useState(null);
   const [dragOverIndex,setDragOverIndex]=useState(null);
   const [showWatchParty,setShowWatchParty]=useState(false);
-  const [mobileMenuOpen,setMobileMenuOpen]=useState(false);
   const [friendProfile,setFriendProfile]=useState(null); // {userId, displayName}
   const [watchTogether,setWatchTogether]=useState({});
   const [sharedCustomUrls,setSharedCustomUrls]=useState({});
@@ -1354,14 +1333,6 @@ export default function App() {
       note:"", _custom:true, _sharedId:row.id, _addedBy:row.added_by, _addedByName:row.added_by_name,
     }));
     setCustomFilms(films);
-    // Re-fetch TMDB poster for any missing ones
-    for(const film of films.filter(f=>!f.posterUrl)){
-      const src=await fetchTMDBPoster(film.t,"w300");
-      if(src){
-        setCustomFilms(cf=>cf.map(f=>f.t===film.t?{...f,posterUrl:src}:f));
-        await supabase.from("shared_films").update({poster_url:src}).eq("film_title",film.t);
-      }
-    }
   }
 
   async function loadUserData(){
@@ -1396,30 +1367,15 @@ export default function App() {
   }
 
   async function loadFriendsData(){
-    const{data}=await supabase.from("user_films").select("film_title,user_id,rating").neq("user_id",user.id);
+    const{data}=await supabase.from("user_films").select("film_title,user_id").eq("watched",true).neq("user_id",user.id);
     if(!data||!data.length) return;
     const userIds=[...new Set(data.map(r=>r.user_id))];
     const{data:profiles}=await supabase.from("profiles").select("id,display_name").in("id",userIds);
     const nameMap={};
     (profiles||[]).forEach(p=>nameMap[p.id]=p.display_name||"friend");
-    const watchedMap={};
-    const ratingsMap={}; // { filmTitle: [{name, rating}] }
-    data.forEach(row=>{
-      const name=nameMap[row.user_id]||"friend";
-      if(row.rating){
-        if(!ratingsMap[row.film_title]) ratingsMap[row.film_title]=[];
-        ratingsMap[row.film_title].push({name,rating:row.rating});
-      }
-    });
-    // Also load watched separately
-    const{data:watchedData}=await supabase.from("user_films").select("film_title,user_id").eq("watched",true).neq("user_id",user.id);
-    (watchedData||[]).forEach(row=>{
-      const name=nameMap[row.user_id]||"friend";
-      if(!watchedMap[row.film_title])watchedMap[row.film_title]=[];
-      if(!watchedMap[row.film_title].includes(name))watchedMap[row.film_title].push(name);
-    });
-    setFriendsData(watchedMap);
-    setFriendsRatings(ratingsMap);
+    const map={};
+    data.forEach(row=>{const name=nameMap[row.user_id]||"friend";if(!map[row.film_title])map[row.film_title]=[];if(!map[row.film_title].includes(name))map[row.film_title].push(name);});
+    setFriendsData(map);
   }
 
   async function loadFeed(){
@@ -1493,6 +1449,7 @@ export default function App() {
 
   async function removeFilm(film){
     if(film._custom){
+      // Only the person who added it can remove it from shared_films
       if(film._addedBy && film._addedBy !== user.id){
         showToast("Only the person who added this can remove it");
         return;
@@ -1500,15 +1457,7 @@ export default function App() {
       setCustomFilms(cf=>cf.filter(f=>f.t!==film.t));
       await supabase.from("shared_films").delete().eq("film_title",film.t);
     } else {
-      // Core film -- hide per user via upsert
-      const{error}=await supabase.from("user_films").upsert(
-        {user_id:user.id,film_title:film.t,hidden:true},
-        {onConflict:"user_id,film_title"}
-      );
-      if(error){
-        // Try insert if upsert fails due to RLS
-        await supabase.from("user_films").insert({user_id:user.id,film_title:film.t,hidden:true}).maybeSingle();
-      }
+      await supabase.from("user_films").upsert({user_id:user.id,film_title:film.t,hidden:true},{onConflict:"user_id,film_title"});
       setHiddenFilms(h=>({...h,[film.t]:true}));
     }
     setFilmOrder(o=>o.filter(t=>t!==film.t));
@@ -1672,95 +1621,66 @@ export default function App() {
       {/* ── NAVBAR ── */}
       <nav style={{
         position:"fixed", top:0, left:0, right:0, zIndex:10000,
-        background:`linear-gradient(to bottom, ${darkMode?"rgba(10,10,13,0.98)":"rgba(244,240,232,0.98)"} 0%, ${darkMode?"rgba(10,10,13,0.85)":"rgba(244,240,232,0.85)"} 100%)`,
-        backdropFilter:"blur(8px)", transition:"background 0.3s",
-        borderBottom:`1px solid ${darkMode?"rgba(255,255,255,0.06)":"rgba(0,0,0,0.08)"}`,
+        display:"flex", alignItems:"center", justifyContent:"space-between",
+        padding:"0 32px", height:72,
+        background:`linear-gradient(to bottom, ${darkMode?"rgba(10,10,13,0.98)":"rgba(244,240,232,0.98)"} 0%, ${darkMode?"rgba(10,10,13,0.6)":"rgba(244,240,232,0.6)"} 70%, transparent 100%)`,
+        backdropFilter:"blur(2px)", transition:"background 0.3s",
       }}>
-        {/* Main navbar row */}
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 16px",height:64}}>
-
-          {/* Logo */}
-          <div style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:2,flexShrink:0}}>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%"}}>
-              {Array.from({length:14},(_,i)=>(
-                <div key={i} style={{width:4,height:4,borderRadius:"50%",flexShrink:0,background:"#f5c518",boxShadow:"0 0 4px #f5c518,0 0 8px #f5c518",margin:"0 2px",animation:`bulb 1.4s ease-in-out ${(i%3)*0.47}s infinite`}} />
-              ))}
-            </div>
-            <div style={{display:"flex",alignItems:"center",gap:5}}>
-              <span style={{display:"inline-block",fontSize:"1rem",animation:"wobble 3s ease-in-out infinite",lineHeight:1}}>🍿</span>
-              <span style={{fontFamily:"'Impact','Arial Black',sans-serif",fontSize:"clamp(0.9rem,3vw,1.4rem)",fontWeight:900,color:"#f5c518",textShadow:"1px 1px 0 #7a620a",textTransform:"uppercase",letterSpacing:"-0.01em",lineHeight:1,whiteSpace:"nowrap"}}>The Watch Queue</span>
-              <span style={{display:"inline-block",fontSize:"1rem",animation:"wobble 3s ease-in-out 1.5s infinite",lineHeight:1}}>🎬</span>
-            </div>
+        {/* Logo */}
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:2}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%"}}>
+            {Array.from({length:22},(_,i)=>(
+              <div key={i} style={{width:5,height:5,borderRadius:"50%",flexShrink:0,background:"#f5c518",boxShadow:"0 0 4px #f5c518,0 0 8px #f5c518",margin:"0 3px",animation:`bulb 1.4s ease-in-out ${(i%3)*0.47}s infinite`}} />
+            ))}
           </div>
-
-          {/* Desktop center filters — hidden on mobile */}
-          <div style={{display:"flex",gap:6,alignItems:"center",position:"absolute",left:"50%",transform:"translateX(-50%)"}}>
-            <style>{`@media(max-width:700px){.nav-filters{display:none!important}}`}</style>
-            <div className="nav-filters" style={{display:"flex",gap:6}}>
-              {[{k:"all",l:"All"},{k:"unwatched",l:"Unwatched"},{k:"watched",l:"Watched"}].map(f=>(
-                <button key={f.k} onClick={()=>setFilter(f.k)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.12em",textTransform:"uppercase",padding:"6px 14px",border:"1px solid",borderColor:filter===f.k?"#f5c518":"rgba(128,128,128,0.25)",background:filter===f.k?"rgba(245,197,24,0.1)":"transparent",color:filter===f.k?"#f5c518":MUTED,borderRadius:3,cursor:"pointer",transition:"all 0.15s"}}>{f.l}</button>
-              ))}
-            </div>
-          </div>
-
-          {/* Right side — desktop shows all, mobile shows minimal */}
-          <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-            {/* Progress pill — always visible */}
-            <div style={{display:"flex",alignItems:"center",gap:6,background:"rgba(128,128,128,0.1)",border:"1px solid rgba(128,128,128,0.15)",borderRadius:20,padding:"4px 10px"}}>
-              <div style={{width:40,height:3,background:"rgba(128,128,128,0.2)",borderRadius:2,overflow:"hidden"}}>
-                <div style={{height:"100%",background:"linear-gradient(90deg,#c0392b,#f5c518)",borderRadius:2,width:`${totalFilms?(watchedCount/totalFilms)*100:0}%`,transition:"width 0.5s"}} />
-              </div>
-              <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",color:"#f5c518",whiteSpace:"nowrap"}}>{watchedCount}/{totalFilms}</span>
-            </div>
-
-            {/* Dark mode — always visible */}
-            <button onClick={()=>setDarkMode(d=>!d)}
-              style={{background:"rgba(128,128,128,0.1)",border:"1px solid rgba(128,128,128,0.2)",borderRadius:3,padding:"5px 8px",cursor:"pointer",fontSize:"0.8rem",color:FG,flexShrink:0}}>
-              {darkMode?"☀️":"🌙"}
-            </button>
-
-            {/* Desktop-only buttons */}
-            <style>{`@media(max-width:700px){.nav-desktop{display:none!important}}`}</style>
-            <div className="nav-desktop" style={{display:"flex",alignItems:"center",gap:8}}>
-              <button onClick={copyLink} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(230,57,70,0.35)",color:"#e63946",borderRadius:3,padding:"5px 12px",cursor:"pointer"}}>Share</button>
-              <button onClick={()=>setShowWatchParty(true)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>🎉 Watch Party</button>
-              <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:4}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#793473,#f5c518)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Impact',sans-serif",fontSize:"0.8rem",color:"#0a0a0d",fontWeight:900,flexShrink:0}}>{displayName.charAt(0).toUpperCase()}</div>
-                <button onClick={signOut} style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(128,128,128,0.2)",color:MUTED,borderRadius:3,padding:"3px 8px",cursor:"pointer"}}>Out</button>
-              </div>
-            </div>
-
-            {/* Hamburger — mobile only */}
-            <style>{`@media(min-width:701px){.nav-hamburger{display:none!important}}`}</style>
-            <button className="nav-hamburger" onClick={()=>setMobileMenuOpen(m=>!m)}
-              style={{background:"rgba(128,128,128,0.1)",border:"1px solid rgba(128,128,128,0.2)",borderRadius:4,padding:"6px 10px",cursor:"pointer",color:FG,fontSize:"1.1rem",lineHeight:1,flexShrink:0}}>
-              {mobileMenuOpen?"✕":"☰"}
-            </button>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{display:"inline-block",fontSize:"1.2rem",animation:"wobble 3s ease-in-out infinite",lineHeight:1}}>🍿</span>
+            <span style={{fontFamily:"'Impact','Arial Black',sans-serif",fontSize:"clamp(1.1rem,2.5vw,1.6rem)",fontWeight:900,color:"#f5c518",textShadow:"1px 1px 0 #7a620a,2px 2px 0 rgba(120,96,10,0.4)",textTransform:"uppercase",letterSpacing:"-0.01em",lineHeight:1}}>The Watch Queue</span>
+            <span style={{display:"inline-block",fontSize:"1.2rem",animation:"wobble 3s ease-in-out 1.5s infinite",lineHeight:1}}>🎬</span>
           </div>
         </div>
 
-        {/* Mobile menu drawer */}
-        {mobileMenuOpen&&(
-          <div style={{borderTop:`1px solid ${darkMode?"rgba(255,255,255,0.08)":"rgba(0,0,0,0.08)"}`,padding:"12px 16px 16px",display:"flex",flexDirection:"column",gap:12}}>
-            {/* Filter tabs */}
-            <div style={{display:"flex",gap:6}}>
-              {[{k:"all",l:"All"},{k:"unwatched",l:"Unwatched"},{k:"watched",l:"Watched"}].map(f=>(
-                <button key={f.k} onClick={()=>{setFilter(f.k);setMobileMenuOpen(false);}} style={{flex:1,fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",padding:"8px 6px",border:"1px solid",borderColor:filter===f.k?"#f5c518":"rgba(128,128,128,0.25)",background:filter===f.k?"rgba(245,197,24,0.1)":"transparent",color:filter===f.k?"#f5c518":MUTED,borderRadius:3,cursor:"pointer"}}>{f.l}</button>
-              ))}
+        {/* Nav filters */}
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          {[{k:"all",l:"All"},{k:"unwatched",l:"Unwatched"},{k:"watched",l:"Watched"}].map(f=>(
+            <button key={f.k} onClick={()=>setFilter(f.k)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.12em",textTransform:"uppercase",padding:"6px 14px",border:"1px solid",borderColor:filter===f.k?"#f5c518":"rgba(128,128,128,0.25)",background:filter===f.k?"rgba(245,197,24,0.1)":"transparent",color:filter===f.k?"#f5c518":MUTED,borderRadius:3,cursor:"pointer",transition:"all 0.15s"}}>{f.l}</button>
+          ))}
+        </div>
+
+        {/* Right */}
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {/* Progress pill */}
+          <div style={{display:"flex",alignItems:"center",gap:8,background:"rgba(128,128,128,0.1)",border:"1px solid rgba(128,128,128,0.15)",borderRadius:20,padding:"4px 12px"}}>
+            <div style={{width:60,height:4,background:"rgba(128,128,128,0.15)",borderRadius:2,overflow:"hidden"}}>
+              <div style={{height:"100%",background:"linear-gradient(90deg,#c0392b,#f5c518)",borderRadius:2,width:`${totalFilms?(watchedCount/totalFilms)*100:0}%`,transition:"width 0.5s"}} />
             </div>
-            {/* Action row */}
-            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <button onClick={()=>{copyLink();setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(230,57,70,0.35)",color:"#e63946",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>Share</button>
-              <button onClick={()=>{setShowWatchParty(true);setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>🎉 Watch Party</button>
-              <button onClick={()=>{signOut();setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(128,128,128,0.2)",color:MUTED,borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>Sign Out</button>
-            </div>
-            {/* User display */}
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#793473,#f5c518)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Impact',sans-serif",fontSize:"0.8rem",color:"#0a0a0d",fontWeight:900}}>{displayName.charAt(0).toUpperCase()}</div>
-              <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",color:MUTED}}>{displayName}</span>
-            </div>
+            <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",color:"#f5c518",whiteSpace:"nowrap"}}>{watchedCount}/{totalFilms}</span>
           </div>
-        )}
+
+          {/* Dark/light mode */}
+          <button onClick={()=>setDarkMode(d=>!d)} title={darkMode?"Light mode":"Dark mode"}
+            style={{background:"rgba(128,128,128,0.1)",border:"1px solid rgba(128,128,128,0.2)",borderRadius:3,padding:"5px 10px",cursor:"pointer",fontSize:"0.85rem",transition:"all 0.15s",color:FG}}>
+            {darkMode?"☀️":"🌙"}
+          </button>
+
+          <button onClick={copyLink} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(230,57,70,0.35)",color:"#e63946",borderRadius:3,padding:"5px 12px",cursor:"pointer",transition:"all 0.15s"}}
+            onMouseEnter={e=>e.currentTarget.style.background="rgba(230,57,70,0.15)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+            Share
+          </button>
+
+          <button onClick={()=>setShowWatchParty(true)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"5px 12px",cursor:"pointer",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5}}
+            onMouseEnter={e=>e.currentTarget.style.background="rgba(109,255,170,0.2)"} onMouseLeave={e=>e.currentTarget.style.background="rgba(109,255,170,0.1)"}>
+            🎉 Watch Party
+          </button>
+
+          {/* User */}
+          <div style={{display:"flex",alignItems:"center",gap:8,padding:"4px 8px",borderRadius:4}}>
+            <div style={{width:32,height:32,borderRadius:"50%",background:"linear-gradient(135deg,#793473,#f5c518)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Impact',sans-serif",fontSize:"0.9rem",color:"#0a0a0d",fontWeight:900,flexShrink:0}}>
+              {displayName.charAt(0).toUpperCase()}
+            </div>
+            <button onClick={signOut} style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(128,128,128,0.2)",color:MUTED,borderRadius:3,padding:"3px 8px",cursor:"pointer"}}>Out</button>
+          </div>
+        </div>
       </nav>
 
       {/* Hero Banner */}
@@ -1920,7 +1840,6 @@ export default function App() {
           rating={ratings[selectedFilm.t]||0}
           streamingLinks={streamingLinks[selectedFilm.t]||{}}
           friendsWatched={friendsData[selectedFilm.t]||[]}
-          friendsRatings={friendsRatings[selectedFilm.t]||[]}
           isCustom={!!selectedFilm._custom && (!selectedFilm._addedBy || selectedFilm._addedBy === user.id)}
           currentUser={user}
           darkMode={darkMode}
