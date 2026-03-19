@@ -1764,7 +1764,7 @@ export default function App() {
       </nav>
 
       {/* Hero Banner */}
-      <div style={{paddingTop:0}}>
+      <div style={{paddingTop:64}}>
         <HeroBanner films={allFilms.filter(f=>!hiddenFilms[f.t])} watched={watched} onOpenFilm={f=>setSelectedFilm(f)} />
       </div>
 
