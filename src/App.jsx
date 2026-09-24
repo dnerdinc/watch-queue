@@ -189,6 +189,65 @@ function anyWatchedInSeasons(seasons, userProgress) {
   return (seasons||[]).some(s=>(s.episodes||[]).some(e=>userProgress?.[s.season_number]?.[e.episode_number]));
 }
 
+// ── CALENDAR / SCHEDULING HELPERS ─────────────
+function fmtDate(d){ const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),day=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${day}`; }
+function parseISODate(s){ const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); }
+function addRecurrenceUnits(startDate, recurrence, n){
+  const d = new Date(startDate);
+  if(recurrence==="daily") d.setDate(d.getDate()+n);
+  else if(recurrence==="weekly") d.setDate(d.getDate()+7*n);
+  else if(recurrence==="monthly"){
+    const day = d.getDate();
+    d.setMonth(d.getMonth()+n);
+    if(d.getDate()!==day) return null; // e.g. Jan 31 -> Feb has no 31st, skip
+  }
+  return d;
+}
+// Expand one schedule row into its concrete occurrence dates within [rangeStart, rangeEnd]
+function generateOccurrencesForItem(item, rangeStart, rangeEnd){
+  const occurrences = [];
+  const start = parseISODate(item.scheduled_date);
+  const endCap = item.recurrence_end_date ? parseISODate(item.recurrence_end_date) : null;
+  const exceptions = new Set(item.exceptions||[]);
+  const interval = item.recurrence_interval||1;
+  if(item.recurrence==="none"||!item.recurrence){
+    if(start>=rangeStart && start<=rangeEnd && !exceptions.has(item.scheduled_date)){
+      occurrences.push({...item, occurrenceDate:item.scheduled_date});
+    }
+    return occurrences;
+  }
+  let n=0;
+  const maxIterations=730; // safety cap (~2 years of daily)
+  while(n<maxIterations){
+    const candidate = addRecurrenceUnits(start, item.recurrence, n*interval);
+    n++;
+    if(!candidate) continue;
+    if(candidate>rangeEnd) break;
+    if(endCap && candidate>endCap) break;
+    if(candidate>=rangeStart){
+      const iso=fmtDate(candidate);
+      if(!exceptions.has(iso)) occurrences.push({...item, occurrenceDate:iso});
+    }
+  }
+  return occurrences;
+}
+function allOccurrencesInRange(items, rangeStart, rangeEnd){
+  const all=[];
+  (items||[]).forEach(item=>{ all.push(...generateOccurrencesForItem(item,rangeStart,rangeEnd)); });
+  all.sort((a,b)=>{
+    if(a.occurrenceDate!==b.occurrenceDate) return a.occurrenceDate<b.occurrenceDate?-1:1;
+    const at=a.scheduled_time||"99:99", bt=b.scheduled_time||"99:99";
+    return at<bt?-1:at>bt?1:0;
+  });
+  return all;
+}
+function fmtTime12(t){
+  if(!t) return "";
+  const [h,m]=t.split(":").map(Number);
+  const ampm=h>=12?"PM":"AM"; const h12=h%12===0?12:h%12;
+  return `${h12}:${String(m).padStart(2,"0")} ${ampm}`;
+}
+
 // ── STREAMING PLATFORMS ──────────────────────
 const PLATFORMS = [
   { id:"netflix",   label:"Netflix",    color:"#E50914", bg:"#141414", icon: <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M5.398 0v.006c3.028 8.556 5.37 15.175 8.348 23.596l2.219.578c.197-.556 1.043-3.044 1.855-5.565l-2.494-7.028C12.681 8.396 10.028 1.12 7.38.006z"/><path d="M5.398 0C3.047.01 1.5.01 1.5.01v23.99l3.898.002V0z"/><path d="M14.548 6.154l.055.157c1.134 3.21 2.3 6.495 3.387 9.638l.91 2.603 3.6.94V.012c-2.292 0-3.908.004-3.908.004z"/></svg> },
@@ -1668,6 +1727,368 @@ function WatchParty({ user, allFilms, onClose }) {
   );
 }
 
+// ── SCHEDULE ITEM MODAL (create/edit) ─────────
+function ScheduleItemModal({ editingItem, initialDate, allMovies, tvShowOptions, scheduledItems, darkMode, onSave, onDeleteSeries, onSkipOccurrence, onClose }) {
+  const isEditing = !!editingItem;
+  const isRecurringOccurrence = isEditing && editingItem.recurrence && editingItem.recurrence!=="none" && editingItem.occurrenceDate;
+  const ACCENT="#b98eff";
+  const BG=darkMode?"#111116":"#fff"; const FG=darkMode?"#ede0cc":"#1a1a1a"; const MUTED=darkMode?"#4a4a5e":"#888"; const BORDER=darkMode?"rgba(255,255,255,0.08)":"rgba(0,0,0,0.08)";
+
+  const [type,setType]=useState(editingItem?.item_type||"movie");
+  const [date,setDate]=useState(editingItem?.occurrenceDate||editingItem?.scheduled_date||initialDate);
+  const [time,setTime]=useState(editingItem?.scheduled_time?.slice(0,5)||"");
+  const [movieTitle,setMovieTitle]=useState(editingItem?.item_type==="movie"?(editingItem?.item_title||""):"");
+  const [tvShowTitle,setTvShowTitle]=useState(editingItem?.item_type==="tv"?(editingItem?.ref_title||""):(tvShowOptions[0]?.show_title||""));
+  const [tvScope,setTvScope]=useState(editingItem?.ref_episode?"episode":editingItem?.ref_season?"season":"show");
+  const [tvSeason,setTvSeason]=useState(editingItem?.ref_season||1);
+  const [tvEpisode,setTvEpisode]=useState(editingItem?.ref_episode||1);
+  const [customTitle,setCustomTitle]=useState(editingItem?.item_type==="custom"?(editingItem?.item_title||""):"");
+  const [recurrence,setRecurrence]=useState(editingItem?.recurrence||"none");
+  const [recurrenceInterval,setRecurrenceInterval]=useState(editingItem?.recurrence_interval||1);
+  const [recurrenceEndDate,setRecurrenceEndDate]=useState(editingItem?.recurrence_end_date||"");
+  const [notes,setNotes]=useState(editingItem?.notes||"");
+
+  useEffect(()=>{ const h=e=>{ if(e.key==="Escape") onClose(); }; window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h); },[onClose]);
+
+  const selectedShow = tvShowOptions.find(s=>s.show_title===tvShowTitle);
+  const seasons = selectedShow?.seasons||[];
+  const selectedSeasonObj = seasons.find(s=>s.season_number===tvSeason);
+  const episodes = selectedSeasonObj?.episodes||[];
+
+  useEffect(()=>{ if(seasons.length && !seasons.find(s=>s.season_number===tvSeason)) setTvSeason(seasons[0].season_number); },[tvShowTitle]);
+  useEffect(()=>{ if(episodes.length && !episodes.find(e=>e.episode_number===tvEpisode)) setTvEpisode(episodes[0].episode_number); },[tvSeason,tvShowTitle]);
+
+  const conflicts = date ? allOccurrencesInRange(scheduledItems, parseISODate(date), parseISODate(date)).filter(o=>o.id!==editingItem?.id) : [];
+
+  function buildPayload(){
+    let item_title, ref_title, ref_season=null, ref_episode=null, poster_url="";
+    if(type==="movie"){
+      const movie = allMovies.find(f=>f.t===movieTitle);
+      item_title = movieTitle.trim(); ref_title = movieTitle.trim(); poster_url = movie?.posterUrl||"";
+    } else if(type==="tv"){
+      ref_title = tvShowTitle; poster_url = selectedShow?.poster_url||"";
+      if(tvScope==="show"){ item_title = tvShowTitle; }
+      else if(tvScope==="season"){ item_title=`${tvShowTitle} — ${selectedSeasonObj?.name||`Season ${tvSeason}`}`; ref_season=tvSeason; }
+      else { const ep=episodes.find(e=>e.episode_number===tvEpisode); item_title=`${tvShowTitle} — S${tvSeason}E${tvEpisode}${ep?`: ${ep.name}`:""}`; ref_season=tvSeason; ref_episode=tvEpisode; }
+    } else {
+      item_title = customTitle.trim(); ref_title = null;
+    }
+    return { item_type:type, item_title, ref_title, ref_season, ref_episode, poster_url,
+      scheduled_date:date, scheduled_time:time||null, recurrence, recurrence_interval:Number(recurrenceInterval)||1,
+      recurrence_end_date:recurrenceEndDate||null, notes:notes.trim()||null };
+  }
+
+  function handleSave(){
+    if(type==="movie" && !movieTitle.trim()) return;
+    if(type==="tv" && !tvShowTitle) return;
+    if(type==="custom" && !customTitle.trim()) return;
+    if(!date) return;
+    const payload = buildPayload();
+    if(isRecurringOccurrence && date!==editingItem.occurrenceDate){
+      onSkipOccurrence(editingItem.id, editingItem.occurrenceDate);
+      onSave(payload, null);
+    } else if(isEditing){
+      onSave(payload, editingItem.id);
+    } else {
+      onSave(payload, null);
+    }
+  }
+
+  return (
+    <div onClick={e=>e.target===e.currentTarget&&onClose()}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:22000,display:"flex",alignItems:"center",justifyContent:"center",padding:20,backdropFilter:"blur(10px)"}}>
+      <div style={{background:BG,border:`1px solid ${ACCENT}44`,borderRadius:10,width:"100%",maxWidth:460,maxHeight:"90vh",overflowY:"auto",padding:24,animation:"modalIn 0.22s cubic-bezier(0.34,1.56,0.64,1)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontFamily:"'Impact','Arial Black',sans-serif",fontSize:"1.2rem",color:ACCENT}}>{isEditing?"Edit Scheduled Item":"Schedule Something"}</div>
+          <button onClick={onClose} style={{background:"none",border:"none",color:MUTED,fontSize:"1.2rem",cursor:"pointer"}}>✕</button>
+        </div>
+
+        <div style={{display:"flex",gap:6,marginBottom:14}}>
+          {[{k:"movie",l:"🎬 Movie"},{k:"tv",l:"📺 TV"},{k:"custom",l:"✏️ Custom"}].map(t=>(
+            <button key={t.k} onClick={()=>setType(t.k)}
+              style={{flex:1,fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"8px 6px",borderRadius:4,border:`1px solid ${type===t.k?ACCENT:BORDER}`,background:type===t.k?`${ACCENT}22`:"transparent",color:type===t.k?ACCENT:MUTED,cursor:"pointer"}}>{t.l}</button>
+          ))}
+        </div>
+
+        {type==="movie" && (
+          <div style={{marginBottom:14}}>
+            <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase",marginBottom:6}}>Movie</div>
+            <input list="wq-movie-list" value={movieTitle} onChange={e=>setMovieTitle(e.target.value)} placeholder="Type or pick a movie..."
+              style={{width:"100%",fontFamily:"'Georgia',serif",fontSize:"0.8rem",padding:"9px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none",boxSizing:"border-box"}} />
+            <datalist id="wq-movie-list">{allMovies.map(f=><option key={f.t} value={f.t} />)}</datalist>
+          </div>
+        )}
+
+        {type==="tv" && (
+          <>
+            <div style={{marginBottom:10}}>
+              <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase",marginBottom:6}}>Show</div>
+              {tvShowOptions.length===0 ? (
+                <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",color:MUTED,fontStyle:"italic"}}>No TV shows in your queue yet — add one first.</div>
+              ) : (
+                <select value={tvShowTitle} onChange={e=>setTvShowTitle(e.target.value)}
+                  style={{width:"100%",fontFamily:"'Courier New',monospace",fontSize:"0.7rem",padding:"8px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none"}}>
+                  {tvShowOptions.map(s=>(<option key={s.show_title} value={s.show_title}>{s.show_title}</option>))}
+                </select>
+              )}
+            </div>
+            {seasons.length>0 && (
+              <div style={{display:"flex",gap:6,marginBottom:10}}>
+                {[{k:"show",l:"Whole Show"},{k:"season",l:"A Season"},{k:"episode",l:"An Episode"}].map(o=>(
+                  <button key={o.k} onClick={()=>setTvScope(o.k)}
+                    style={{flex:1,fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.06em",textTransform:"uppercase",padding:"6px 4px",borderRadius:4,border:`1px solid ${tvScope===o.k?ACCENT:BORDER}`,background:tvScope===o.k?`${ACCENT}18`:"transparent",color:tvScope===o.k?ACCENT:MUTED,cursor:"pointer"}}>{o.l}</button>
+                ))}
+              </div>
+            )}
+            {(tvScope==="season"||tvScope==="episode") && seasons.length>0 && (
+              <div style={{marginBottom:tvScope==="episode"?10:14}}>
+                <select value={tvSeason} onChange={e=>setTvSeason(Number(e.target.value))}
+                  style={{width:"100%",fontFamily:"'Courier New',monospace",fontSize:"0.68rem",padding:"7px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none"}}>
+                  {seasons.map(s=>(<option key={s.season_number} value={s.season_number}>{s.name||`Season ${s.season_number}`}</option>))}
+                </select>
+              </div>
+            )}
+            {tvScope==="episode" && episodes.length>0 && (
+              <div style={{marginBottom:14}}>
+                <select value={tvEpisode} onChange={e=>setTvEpisode(Number(e.target.value))}
+                  style={{width:"100%",fontFamily:"'Courier New',monospace",fontSize:"0.68rem",padding:"7px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none"}}>
+                  {episodes.map(e=>(<option key={e.episode_number} value={e.episode_number}>E{e.episode_number} — {e.name}</option>))}
+                </select>
+              </div>
+            )}
+          </>
+        )}
+
+        {type==="custom" && (
+          <div style={{marginBottom:14}}>
+            <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase",marginBottom:6}}>What is it?</div>
+            <input value={customTitle} onChange={e=>setCustomTitle(e.target.value)} placeholder="e.g. Marathon night, Game 7, etc."
+              style={{width:"100%",fontFamily:"'Georgia',serif",fontSize:"0.8rem",padding:"9px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none",boxSizing:"border-box"}} />
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:10,marginBottom:6}}>
+          <div style={{flex:1}}>
+            <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase",marginBottom:6}}>Date</div>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)}
+              style={{width:"100%",fontFamily:"'Courier New',monospace",fontSize:"0.7rem",padding:"8px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none",boxSizing:"border-box"}} />
+          </div>
+          <div style={{flex:1}}>
+            <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase",marginBottom:6}}>Time (optional)</div>
+            <input type="time" value={time} onChange={e=>setTime(e.target.value)}
+              style={{width:"100%",fontFamily:"'Courier New',monospace",fontSize:"0.7rem",padding:"8px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none",boxSizing:"border-box"}} />
+          </div>
+        </div>
+
+        {conflicts.length>0 && (
+          <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",color:"#ffb454",background:"rgba(255,180,84,0.08)",border:"1px solid rgba(255,180,84,0.3)",borderRadius:4,padding:"7px 10px",marginBottom:14,lineHeight:1.5}}>
+            ⚠️ {conflicts.length} other item{conflicts.length!==1?"s":""} already scheduled that day: {conflicts.map(c=>c.item_title).join(", ")}
+          </div>
+        )}
+        {conflicts.length===0 && <div style={{marginBottom:14}} />}
+
+        {isRecurringOccurrence && date!==editingItem.occurrenceDate && (
+          <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",color:ACCENT,background:`${ACCENT}14`,border:`1px solid ${ACCENT}44`,borderRadius:4,padding:"7px 10px",marginBottom:14,lineHeight:1.5}}>
+            This will move just this one occurrence to the new date — the rest of the series stays put.
+          </div>
+        )}
+
+        <div style={{marginBottom:14}}>
+          <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase",marginBottom:6}}>Repeats</div>
+          <div style={{display:"flex",gap:6,marginBottom:recurrence!=="none"?8:0}}>
+            {[{k:"none",l:"Never"},{k:"daily",l:"Daily"},{k:"weekly",l:"Weekly"},{k:"monthly",l:"Monthly"}].map(r=>(
+              <button key={r.k} onClick={()=>setRecurrence(r.k)}
+                style={{flex:1,fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.06em",textTransform:"uppercase",padding:"7px 4px",borderRadius:4,border:`1px solid ${recurrence===r.k?ACCENT:BORDER}`,background:recurrence===r.k?`${ACCENT}18`:"transparent",color:recurrence===r.k?ACCENT:MUTED,cursor:"pointer"}}>{r.l}</button>
+            ))}
+          </div>
+          {recurrence!=="none" && (
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",color:MUTED}}>Every</span>
+              <input type="number" min="1" max="52" value={recurrenceInterval} onChange={e=>setRecurrenceInterval(e.target.value)}
+                style={{width:50,fontFamily:"'Courier New',monospace",fontSize:"0.68rem",padding:"6px 8px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none"}} />
+              <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",color:MUTED}}>{recurrence==="daily"?"day(s)":recurrence==="weekly"?"week(s)":"month(s)"}</span>
+              <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",color:MUTED,marginLeft:"auto"}}>Until</span>
+              <input type="date" value={recurrenceEndDate} onChange={e=>setRecurrenceEndDate(e.target.value)}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",padding:"6px 8px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none"}} />
+            </div>
+          )}
+        </div>
+
+        <div style={{marginBottom:18}}>
+          <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase",marginBottom:6}}>Notes (optional)</div>
+          <input value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Anything worth noting..."
+            style={{width:"100%",fontFamily:"'Georgia',serif",fontSize:"0.75rem",padding:"8px 10px",border:`1px solid ${BORDER}`,background:darkMode?"#0d0d18":"#f7f7f7",color:FG,borderRadius:4,outline:"none",boxSizing:"border-box"}} />
+        </div>
+
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {isEditing && (
+            <>
+              {isRecurringOccurrence && (
+                <button onClick={()=>{onSkipOccurrence(editingItem.id, editingItem.occurrenceDate); onClose();}}
+                  style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"10px 12px",borderRadius:4,border:"1px solid rgba(230,57,70,0.3)",background:"transparent",color:"#e63946",cursor:"pointer"}}>
+                  Skip This Date
+                </button>
+              )}
+              <button onClick={()=>{onDeleteSeries(editingItem.id); onClose();}}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"10px 12px",borderRadius:4,border:"none",background:"rgba(230,57,70,0.85)",color:"#fff",cursor:"pointer"}}>
+                {isRecurringOccurrence?"Delete Whole Series":"Delete"}
+              </button>
+            </>
+          )}
+          <button onClick={handleSave}
+            style={{flex:1,fontFamily:"'Courier New',monospace",fontSize:"0.65rem",letterSpacing:"0.1em",textTransform:"uppercase",padding:"11px",borderRadius:4,border:"none",background:ACCENT,color:"#0a0a0d",fontWeight:"bold",cursor:"pointer"}}>
+            {isEditing?"Save Changes":"Schedule It"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── CALENDAR MODAL ─────────────────────────────
+function CalendarModal({ scheduledItems, tvShowOptions, allMovies, darkMode, onSaveItem, onDeleteSeries, onSkipOccurrence, onClose }) {
+  const [viewMode,setViewMode]=useState("month");
+  const [anchor,setAnchor]=useState(new Date());
+  const [editing,setEditing]=useState(null);
+  const ACCENT="#b98eff";
+  const BG=darkMode?"#0a0a0d":"#f4f0e8"; const FG=darkMode?"#ede0cc":"#1a1a1a"; const MUTED=darkMode?"#4a4a5e":"#888"; const BORDER=darkMode?"rgba(255,255,255,0.08)":"rgba(0,0,0,0.08)"; const CARD=darkMode?"#111116":"#fff";
+
+  useEffect(()=>{ const h=e=>{ if(e.key==="Escape" && !editing) onClose(); }; window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h); },[onClose,editing]);
+
+  let rangeStart,rangeEnd,gridDays=[];
+  if(viewMode==="month"){
+    const year=anchor.getFullYear(), month=anchor.getMonth();
+    const firstOfMonth=new Date(year,month,1);
+    rangeStart=new Date(year,month,1-firstOfMonth.getDay());
+    const lastOfMonth=new Date(year,month+1,0);
+    rangeEnd=new Date(year,month,lastOfMonth.getDate()+(6-lastOfMonth.getDay()));
+  } else {
+    rangeStart=new Date(anchor); rangeStart.setDate(anchor.getDate()-anchor.getDay());
+    rangeEnd=new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate()+6);
+  }
+  let cur=new Date(rangeStart);
+  while(cur<=rangeEnd){ gridDays.push(new Date(cur)); cur.setDate(cur.getDate()+1); }
+
+  const occurrences = allOccurrencesInRange(scheduledItems, rangeStart, rangeEnd);
+  const byDate = {};
+  occurrences.forEach(o=>{ if(!byDate[o.occurrenceDate]) byDate[o.occurrenceDate]=[]; byDate[o.occurrenceDate].push(o); });
+  const todayStr = fmtDate(new Date());
+
+  function navigate(dir){
+    const next=new Date(anchor);
+    if(viewMode==="month") next.setMonth(next.getMonth()+dir); else next.setDate(next.getDate()+7*dir);
+    setAnchor(next);
+  }
+
+  const monthLabel = anchor.toLocaleDateString("en-US",{month:"long",year:"numeric"});
+  const weekLabel = `${rangeStart.toLocaleDateString("en-US",{month:"short",day:"numeric"})} – ${rangeEnd.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}`;
+
+  return (
+    <div onClick={e=>{ if(e.target===e.currentTarget && !editing) onClose(); }}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",zIndex:20500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(10px)"}}>
+      <div style={{background:BG,border:`1px solid ${ACCENT}33`,borderRadius:10,width:"100%",maxWidth:920,maxHeight:"92vh",overflowY:"auto",position:"relative",animation:"modalIn 0.25s cubic-bezier(0.34,1.56,0.64,1)"}}>
+
+        <div style={{position:"sticky",top:0,zIndex:2,background:BG,padding:"18px 20px 12px",borderBottom:`1px solid ${BORDER}`}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontFamily:"'Impact','Arial Black',sans-serif",fontSize:"1.3rem",color:ACCENT}}>📅 Calendar</span>
+              <button onClick={onClose} style={{background:"none",border:"none",color:MUTED,fontSize:"1.1rem",cursor:"pointer",marginLeft:6}}>✕</button>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <button onClick={()=>navigate(-1)} style={{background:"rgba(128,128,128,0.1)",border:`1px solid ${BORDER}`,borderRadius:4,padding:"5px 10px",color:FG,cursor:"pointer"}}>‹</button>
+              <button onClick={()=>setAnchor(new Date())} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(128,128,128,0.1)",border:`1px solid ${BORDER}`,borderRadius:4,padding:"6px 10px",color:MUTED,cursor:"pointer"}}>Today</button>
+              <button onClick={()=>navigate(1)} style={{background:"rgba(128,128,128,0.1)",border:`1px solid ${BORDER}`,borderRadius:4,padding:"5px 10px",color:FG,cursor:"pointer"}}>›</button>
+              <span style={{fontFamily:"'Georgia',serif",fontSize:"0.95rem",color:FG,fontWeight:"bold",marginLeft:6,whiteSpace:"nowrap"}}>{viewMode==="month"?monthLabel:weekLabel}</span>
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <div style={{display:"flex",borderRadius:4,overflow:"hidden",border:`1px solid ${BORDER}`}}>
+                {[{k:"month",l:"Month"},{k:"week",l:"Week"}].map(v=>(
+                  <button key={v.k} onClick={()=>setViewMode(v.k)}
+                    style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"6px 12px",border:"none",background:viewMode===v.k?`${ACCENT}22`:"transparent",color:viewMode===v.k?ACCENT:MUTED,cursor:"pointer"}}>{v.l}</button>
+                ))}
+              </div>
+              <button onClick={()=>setEditing({mode:"new",date:todayStr})}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"7px 14px",borderRadius:4,border:"none",background:ACCENT,color:"#0a0a0d",fontWeight:"bold",cursor:"pointer"}}>+ Schedule</button>
+            </div>
+          </div>
+        </div>
+
+        {viewMode==="month" && (
+          <div style={{padding:"14px 20px 20px"}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:BORDER,border:`1px solid ${BORDER}`,borderRadius:6,overflow:"hidden"}}>
+              {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
+                <div key={d} style={{background:CARD,padding:"6px 4px",textAlign:"center",fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",color:MUTED,textTransform:"uppercase"}}>{d}</div>
+              ))}
+              {gridDays.map((day,i)=>{
+                const iso=fmtDate(day);
+                const inMonth=day.getMonth()===anchor.getMonth();
+                const items=byDate[iso]||[];
+                const isToday=iso===todayStr;
+                return (
+                  <div key={i} onClick={()=>setEditing({mode:"new",date:iso})}
+                    style={{background:CARD,minHeight:78,padding:"5px 5px",opacity:inMonth?1:0.35,cursor:"pointer",position:"relative",border:isToday?`1px solid ${ACCENT}`:"none",display:"flex",flexDirection:"column",gap:2}}>
+                    <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",color:isToday?ACCENT:MUTED,fontWeight:isToday?"bold":"normal",marginBottom:2}}>{day.getDate()}</div>
+                    {items.slice(0,3).map((it,j)=>(
+                      <div key={j} onClick={e=>{e.stopPropagation();setEditing({mode:"edit",item:it});}}
+                        title={it.item_title}
+                        style={{fontFamily:"'Courier New',monospace",fontSize:"0.5rem",padding:"2px 4px",borderRadius:3,background:it.item_type==="movie"?"rgba(245,197,24,0.15)":it.item_type==="tv"?"rgba(119,187,255,0.15)":`${ACCENT}22`,color:it.item_type==="movie"?"#f5c518":it.item_type==="tv"?"#77bbff":ACCENT,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>
+                        {it.scheduled_time?`${fmtTime12(it.scheduled_time)} `:""}{it.item_title}
+                      </div>
+                    ))}
+                    {items.length>3 && <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.48rem",color:MUTED}}>+{items.length-3} more</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {viewMode==="week" && (
+          <div style={{padding:"14px 20px 20px",display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:8}}>
+            {gridDays.map((day,i)=>{
+              const iso=fmtDate(day);
+              const items=byDate[iso]||[];
+              const isToday=iso===todayStr;
+              return (
+                <div key={i} style={{border:`1px solid ${isToday?ACCENT:BORDER}`,borderRadius:6,minHeight:180,display:"flex",flexDirection:"column"}}>
+                  <div onClick={()=>setEditing({mode:"new",date:iso})} style={{padding:"8px",borderBottom:`1px solid ${BORDER}`,cursor:"pointer",textAlign:"center"}}>
+                    <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:MUTED,textTransform:"uppercase"}}>{day.toLocaleDateString("en-US",{weekday:"short"})}</div>
+                    <div style={{fontFamily:"'Georgia',serif",fontSize:"1rem",color:isToday?ACCENT:FG,fontWeight:"bold"}}>{day.getDate()}</div>
+                  </div>
+                  <div style={{padding:6,display:"flex",flexDirection:"column",gap:4,flex:1}}>
+                    {items.length===0 && <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.5rem",color:MUTED,textAlign:"center",marginTop:8,opacity:0.5}}>—</div>}
+                    {items.map((it,j)=>(
+                      <div key={j} onClick={()=>setEditing({mode:"edit",item:it})}
+                        style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",padding:"5px 6px",borderRadius:4,background:it.item_type==="movie"?"rgba(245,197,24,0.12)":it.item_type==="tv"?"rgba(119,187,255,0.12)":`${ACCENT}18`,color:it.item_type==="movie"?"#f5c518":it.item_type==="tv"?"#77bbff":ACCENT,cursor:"pointer",lineHeight:1.4}}>
+                        {it.scheduled_time && <div style={{opacity:0.7,fontSize:"0.5rem"}}>{fmtTime12(it.scheduled_time)}</div>}
+                        <div>{it.item_title}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {editing && (
+        <ScheduleItemModal
+          editingItem={editing.mode==="edit"?editing.item:null}
+          initialDate={editing.date}
+          allMovies={allMovies}
+          tvShowOptions={tvShowOptions}
+          scheduledItems={scheduledItems}
+          darkMode={darkMode}
+          onSave={(payload,id)=>{ onSaveItem(payload,id); setEditing(null); }}
+          onDeleteSeries={id=>{ onDeleteSeries(id); setEditing(null); }}
+          onSkipOccurrence={(id,dateStr)=>{ onSkipOccurrence(id,dateStr); }}
+          onClose={()=>setEditing(null)} />
+      )}
+    </div>
+  );
+}
+
 // ── MAIN APP ──────────────────────────────────
 export default function App() {
   const [user,setUser]=useState(null);
@@ -1700,6 +2121,8 @@ export default function App() {
   const [selectedShow,setSelectedShow]=useState(null);
   const [searchMode,setSearchMode]=useState("movie"); // movie | tv
   const [tvAddPicker,setTvAddPicker]=useState(null); // {page, tmdb}
+  const [showCalendar,setShowCalendar]=useState(false);
+  const [scheduledItems,setScheduledItems]=useState([]);
   const [friendProfile,setFriendProfile]=useState(null); // {userId, displayName}
   const [watchTogether,setWatchTogether]=useState({});
   const [sharedCustomUrls,setSharedCustomUrls]=useState({});
@@ -1731,16 +2154,47 @@ export default function App() {
 
   useEffect(()=>{
     if(!user) return;
-    loadUserData();loadSharedFilms();loadFriendsData();loadFeed();loadTVShows();loadEpisodeProgress();
+    loadUserData();loadSharedFilms();loadFriendsData();loadFeed();loadTVShows();loadEpisodeProgress();loadScheduledItems();
     const ch=supabase.channel("wq-rt")
       .on("postgres_changes",{event:"*",schema:"public",table:"user_films"},()=>{loadFriendsData();loadFeed();})
       .on("postgres_changes",{event:"*",schema:"public",table:"activity_feed"},()=>loadFeed())
       .on("postgres_changes",{event:"*",schema:"public",table:"shared_films"},()=>loadSharedFilms())
       .on("postgres_changes",{event:"*",schema:"public",table:"shared_tv_shows"},()=>loadTVShows())
       .on("postgres_changes",{event:"*",schema:"public",table:"user_episode_progress"},()=>loadEpisodeProgress())
+      .on("postgres_changes",{event:"*",schema:"public",table:"scheduled_items"},()=>loadScheduledItems())
       .subscribe();
     return()=>supabase.removeChannel(ch);
   },[user]);
+
+  async function loadScheduledItems(){
+    const{data}=await supabase.from("scheduled_items").select("*").order("scheduled_date",{ascending:true});
+    setScheduledItems(data||[]);
+  }
+
+  async function saveScheduledItem(payload,id){
+    const dName=user.user_metadata?.display_name||user.email?.split("@")[0]||"someone";
+    if(id){
+      const{error}=await supabase.from("scheduled_items").update(payload).eq("id",id);
+      if(error){ console.error(error); showToast("Could not update"); return; }
+      showToast(`"${payload.item_title}" updated`);
+    } else {
+      const{error}=await supabase.from("scheduled_items").insert({...payload, created_by:user.id, created_by_name:dName});
+      if(error){ console.error(error); showToast("Could not schedule"); return; }
+      showToast(`"${payload.item_title}" scheduled 📅`);
+    }
+  }
+
+  async function deleteScheduledSeries(id){
+    await supabase.from("scheduled_items").delete().eq("id",id);
+    showToast("Removed from calendar");
+  }
+
+  async function skipScheduledOccurrence(id,dateStr){
+    const item = scheduledItems.find(s=>s.id===id);
+    if(!item) return;
+    const exceptions = [...(item.exceptions||[]), dateStr];
+    await supabase.from("scheduled_items").update({exceptions}).eq("id",id);
+  }
 
   async function loadTVShows(){
     const{data}=await supabase.from("shared_tv_shows").select("*").order("created_at",{ascending:true});
@@ -2223,6 +2677,7 @@ export default function App() {
             <div className="nav-desktop" style={{display:"flex",alignItems:"center",gap:8}}>
               <button onClick={copyLink} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(230,57,70,0.35)",color:"#e63946",borderRadius:3,padding:"5px 12px",cursor:"pointer"}}>Share</button>
               <button onClick={()=>setShowWatchParty(true)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>🎉 Watch Party</button>
+              <button onClick={()=>setShowCalendar(true)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(185,142,255,0.1)",border:"1px solid rgba(185,142,255,0.35)",color:"#b98eff",borderRadius:3,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>📅 Calendar</button>
               <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:4}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#793473,#f5c518)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Impact',sans-serif",fontSize:"0.8rem",color:"#0a0a0d",fontWeight:900,flexShrink:0}}>{displayName.charAt(0).toUpperCase()}</div>
                 <button onClick={signOut} style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(128,128,128,0.2)",color:MUTED,borderRadius:3,padding:"3px 8px",cursor:"pointer"}}>Out</button>
@@ -2251,6 +2706,7 @@ export default function App() {
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <button onClick={()=>{copyLink();setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(230,57,70,0.35)",color:"#e63946",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>Share</button>
               <button onClick={()=>{setShowWatchParty(true);setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>🎉 Watch Party</button>
+              <button onClick={()=>{setShowCalendar(true);setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(185,142,255,0.1)",border:"1px solid rgba(185,142,255,0.35)",color:"#b98eff",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>📅 Calendar</button>
               <button onClick={()=>{signOut();setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(128,128,128,0.2)",color:MUTED,borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>Sign Out</button>
             </div>
             {/* User display */}
@@ -2495,6 +2951,26 @@ export default function App() {
       {/* Watch Party */}
       {showWatchParty&&(
         <WatchParty user={user} allFilms={allFilms.filter(f=>!hiddenFilms[f.t])} onClose={()=>setShowWatchParty(false)} />
+      )}
+
+      {/* Calendar */}
+      {showCalendar&&(
+        <CalendarModal
+          scheduledItems={scheduledItems}
+          tvShowOptions={(()=>{
+            const byTitle={};
+            tvShows.forEach(row=>{
+              const existing=byTitle[row.show_title];
+              if(!existing||(row.seasons?.length||0)>(existing.seasons?.length||0)) byTitle[row.show_title]=row;
+            });
+            return Object.values(byTitle);
+          })()}
+          allMovies={allFilms.filter(f=>!hiddenFilms[f.t])}
+          darkMode={darkMode}
+          onSaveItem={saveScheduledItem}
+          onDeleteSeries={deleteScheduledSeries}
+          onSkipOccurrence={skipScheduledOccurrence}
+          onClose={()=>setShowCalendar(false)} />
       )}
 
       {/* Toast */}
