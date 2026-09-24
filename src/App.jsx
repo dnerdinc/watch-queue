@@ -136,6 +136,42 @@ async function fetchWatchProviders(filmTitle) {
   }
 }
 
+// ── TMDB TV SHOW FUNCTIONS ───────────────────
+async function fetchTMDBShow(title) {
+  try {
+    const headers = { Authorization:`Bearer ${TMDB_TOKEN}` };
+    const r = await fetch(`https://api.themoviedb.org/3/search/tv?query=${encodeURIComponent(cleanTitle(title))}&language=en-US&page=1`,{headers});
+    const d = await r.json();
+    const show = d.results?.[0];
+    if (!show) return null;
+    const r2 = await fetch(`https://api.themoviedb.org/3/tv/${show.id}?language=en-US`,{headers});
+    const d2 = await r2.json();
+    const seasons = await Promise.all(
+      (d2.seasons||[]).filter(s=>s.season_number>0).map(async s=>{
+        const r3 = await fetch(`https://api.themoviedb.org/3/tv/${show.id}/season/${s.season_number}?language=en-US`,{headers});
+        const d3 = await r3.json();
+        return {
+          season_number: s.season_number,
+          name: s.name,
+          episode_count: s.episode_count,
+          episodes: (d3.episodes||[]).map(e=>({ episode_number:e.episode_number, name:e.name }))
+        };
+      })
+    );
+    const r4 = await fetch(`https://api.themoviedb.org/3/tv/${show.id}/videos?language=en-US`,{headers});
+    const d4 = await r4.json();
+    const trailer = d4.results?.find(v=>v.site==="YouTube"&&v.type==="Trailer") || d4.results?.find(v=>v.site==="YouTube");
+    return {
+      tmdb_id: show.id,
+      poster: show.poster_path ? `https://image.tmdb.org/t/p/w300${show.poster_path}` : null,
+      backdrop: show.backdrop_path ? `https://image.tmdb.org/t/p/original${show.backdrop_path}` : null,
+      summary: (d2.overview||"").slice(0,300),
+      seasons,
+      youtubeKey: trailer?.key||null,
+    };
+  } catch(_){ return null; }
+}
+
 // ── STREAMING PLATFORMS ──────────────────────
 const PLATFORMS = [
   { id:"netflix",   label:"Netflix",    color:"#E50914", bg:"#141414", icon: <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M5.398 0v.006c3.028 8.556 5.37 15.175 8.348 23.596l2.219.578c.197-.556 1.043-3.044 1.855-5.565l-2.494-7.028C12.681 8.396 10.028 1.12 7.38.006z"/><path d="M5.398 0C3.047.01 1.5.01 1.5.01v23.99l3.898.002V0z"/><path d="M14.548 6.154l.055.157c1.134 3.21 2.3 6.495 3.387 9.638l.91 2.603 3.6.94V.012c-2.292 0-3.908.004-3.908.004z"/></svg> },
@@ -1000,6 +1036,250 @@ function ActivityFeed({ feed, onClickFriend }) {
   );
 }
 
+// ── TV SHOW TILE ──────────────────────────────
+function TVShowTile({ show, myProgress, groupProgress, onOpen, onRemove, index, darkMode }) {
+  const [hovered, setHovered] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [visible, setVisible] = useState(false);
+  useEffect(()=>{ const t=setTimeout(()=>setVisible(true),index*30); return()=>clearTimeout(t); },[index]);
+
+  const totalEps = (show.seasons||[]).reduce((a,s)=>a+(s.episode_count||0),0);
+  const myWatched = Object.values(myProgress||{}).reduce((a,s)=>a+Object.values(s).filter(Boolean).length,0);
+  const pct = totalEps ? Math.round((myWatched/totalEps)*100) : 0;
+  const done = myWatched === totalEps && totalEps > 0;
+
+  // Group: how many users have finished at least one episode
+  const groupCount = Object.keys(groupProgress||{}).filter(uid=>
+    Object.values(groupProgress[uid]||{}).some(s=>Object.values(s).some(Boolean))
+  ).length;
+
+  return (
+    <>
+      {confirmOpen && <ConfirmRemoveModal film={{t:show.show_title}} onConfirm={()=>{setConfirmOpen(false);onRemove(show);}} onCancel={()=>setConfirmOpen(false)} />}
+      <div onClick={()=>onOpen(show)}
+        onMouseEnter={()=>setHovered(true)} onMouseLeave={()=>setHovered(false)}
+        style={{
+          position:"relative", borderRadius:6, overflow:"hidden", aspectRatio:"2/3",
+          background:"#0d0d18",
+          border:`2px solid ${done?"rgba(109,255,170,0.5)":hovered?"rgba(245,197,24,0.55)":"rgba(255,255,255,0.08)"}`,
+          opacity: visible?1:0,
+          transform: visible?"translateY(0) scale(1)":"translateY(14px) scale(0.96)",
+          transition:`opacity 0.38s ease ${index*0.025}s, transform 0.38s ease ${index*0.025}s, border-color 0.2s`,
+          boxShadow: hovered?"0 16px 48px rgba(0,0,0,0.75)":"0 4px 16px rgba(0,0,0,0.5)",
+          cursor:"pointer",
+        }}>
+
+        {/* Poster */}
+        {show.poster_url ? (
+          <img src={show.poster_url} alt={show.show_title}
+            style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",
+              filter:done?"grayscale(50%) brightness(0.65)":"none",
+              transform:hovered?"scale(1.04)":"scale(1)",
+              transition:"filter 0.4s, transform 0.4s", pointerEvents:"none"}} />
+        ) : (
+          <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:6}}>
+            <span style={{fontSize:"2rem",opacity:0.15}}>📺</span>
+            <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.45rem",color:"rgba(255,255,255,0.12)",textAlign:"center",padding:"0 8px"}}>{show.show_title}</span>
+          </div>
+        )}
+
+        {/* TV badge */}
+        <div style={{position:"absolute",top:6,left:6,zIndex:5,background:"rgba(119,187,255,0.2)",border:"1px solid rgba(119,187,255,0.5)",borderRadius:4,padding:"1px 5px",fontFamily:"'Courier New',monospace",fontSize:"0.45rem",color:"#77bbff",letterSpacing:"0.08em",fontWeight:"bold"}}>
+          TV
+        </div>
+
+        {/* Done checkmark */}
+        {done && (
+          <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",zIndex:3,pointerEvents:"none",background:"rgba(10,10,13,0.5)"}}>
+            <div style={{width:46,height:46,borderRadius:"50%",background:"#6dffaa",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 0 0 5px rgba(109,255,170,0.2),0 0 28px rgba(109,255,170,0.4)"}}>
+              <span style={{fontSize:"1.4rem",lineHeight:1,color:"#0a0a0d"}}>✓</span>
+            </div>
+          </div>
+        )}
+
+        {/* Progress bar + info */}
+        <div style={{position:"absolute",bottom:0,left:0,right:0,zIndex:4,background:"linear-gradient(to top,rgba(0,0,0,0.95) 0%,rgba(0,0,0,0.4) 80%,transparent 100%)",padding:"8px 9px 7px"}}>
+          <div style={{fontFamily:"'Georgia',serif",fontSize:"0.62rem",color:"rgba(255,255,255,0.85)",lineHeight:1.3,marginBottom:4}}>{show.show_title}</div>
+          {totalEps > 0 && (
+            <>
+              <div style={{height:3,background:"rgba(255,255,255,0.1)",borderRadius:2,marginBottom:3,overflow:"hidden"}}>
+                <div style={{height:"100%",background:done?"#6dffaa":"#77bbff",borderRadius:2,width:`${pct}%`,transition:"width 0.5s"}} />
+              </div>
+              <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.48rem",color:"rgba(255,255,255,0.5)"}}>
+                {myWatched}/{totalEps} eps {groupCount>0&&<span style={{color:"#6dffaa",marginLeft:4}}>· 👥{groupCount}</span>}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Hover overlay */}
+        {!done && (
+          <div style={{position:"absolute",inset:0,background:"linear-gradient(to top,rgba(0,0,0,0.9) 0%,transparent 50%)",opacity:hovered?1:0,transition:"opacity 0.22s",zIndex:2,pointerEvents:"none"}} />
+        )}
+
+        {/* Friends badge */}
+        {groupCount > 0 && (
+          <div style={{position:"absolute",top:6,right:28,zIndex:5,background:"rgba(109,255,170,0.18)",border:"1px solid rgba(109,255,170,0.4)",borderRadius:10,padding:"2px 7px",fontFamily:"'Courier New',monospace",fontSize:"0.5rem",color:"#6dffaa",pointerEvents:"none"}}>
+            👥 {groupCount}
+          </div>
+        )}
+
+        {/* Trash */}
+        <button onClick={e=>{e.stopPropagation();setConfirmOpen(true);}}
+          style={{position:"absolute",top:4,right:4,zIndex:6,background:"rgba(0,0,0,0.7)",border:"none",borderRadius:4,width:22,height:22,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",opacity:hovered?0.9:0,transition:"opacity 0.2s",color:"#e63946",fontSize:"0.7rem"}}>
+          🗑
+        </button>
+      </div>
+    </>
+  );
+}
+
+// ── TV SHOW MODAL ─────────────────────────────
+function TVShowModal({ show, myProgress, groupProgress, currentUser, onEpisodeToggle, onClose, darkMode }) {
+  const [openSeason, setOpenSeason] = useState(null);
+  const [tab, setTab] = useState("mine"); // mine | group
+  const BG = darkMode ? "#111116" : "#fff";
+  const FG = darkMode ? "#ede0cc" : "#1a1a1a";
+  const MUTED = darkMode ? "#4a4a5e" : "#888";
+  const BORDER = darkMode ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.08)";
+
+  useEffect(()=>{
+    const h=e=>{ if(e.key==="Escape") onClose(); };
+    window.addEventListener("keydown",h);
+    return()=>window.removeEventListener("keydown",h);
+  },[onClose]);
+
+  const seasons = show.seasons || [];
+  const totalEps = seasons.reduce((a,s)=>a+(s.episode_count||0),0);
+  const myWatched = Object.values(myProgress||{}).reduce((a,s)=>a+Object.values(s).filter(Boolean).length,0);
+
+  function isEpWatched(seasonNum, epNum) {
+    return !!(myProgress?.[seasonNum]?.[epNum]);
+  }
+
+  function isSeasonDone(season) {
+    return season.episodes.every(e=>isEpWatched(season.season_number,e.episode_number));
+  }
+
+  function toggleSeason(season) {
+    const done = isSeasonDone(season);
+    season.episodes.forEach(e=>onEpisodeToggle(season.season_number, e.episode_number, !done));
+  }
+
+  // Group: all users' progress per episode
+  function groupEpCount(seasonNum, epNum) {
+    return Object.values(groupProgress||{}).filter(u=>u?.[seasonNum]?.[epNum]).length;
+  }
+
+  return (
+    <div onClick={e=>e.target===e.currentTarget&&onClose()}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",zIndex:20000,display:"flex",alignItems:"center",justifyContent:"center",padding:20,backdropFilter:"blur(12px)"}}>
+      <div style={{background:BG,border:"1px solid rgba(119,187,255,0.2)",borderRadius:10,width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto",position:"relative",animation:"modalIn 0.25s cubic-bezier(0.34,1.56,0.64,1)"}}>
+        <button onClick={onClose} style={{position:"absolute",top:14,right:14,background:"none",border:"none",color:MUTED,fontSize:"1.2rem",cursor:"pointer",zIndex:1}}>✕</button>
+
+        {/* Header */}
+        <div style={{display:"flex",gap:16,padding:20,borderBottom:`1px solid ${BORDER}`}}>
+          {show.poster_url && <img src={show.poster_url} alt={show.show_title} style={{width:80,aspectRatio:"2/3",objectFit:"cover",borderRadius:4,flexShrink:0}} />}
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+              <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.12em",color:"#77bbff",border:"1px solid rgba(119,187,255,0.4)",borderRadius:3,padding:"1px 6px",fontWeight:"bold"}}>TV SHOW</span>
+            </div>
+            <div style={{fontFamily:"'Impact','Arial Black',sans-serif",fontSize:"1.4rem",color:"#77bbff",textTransform:"uppercase",lineHeight:1,marginBottom:8}}>{show.show_title}</div>
+            {show.summary && <p style={{fontFamily:"'Georgia',serif",fontSize:"0.75rem",color:FG,lineHeight:1.6,fontStyle:"italic",marginBottom:8,opacity:0.8}}>{show.summary}</p>}
+            {/* Progress */}
+            <div style={{marginBottom:6}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",color:MUTED,letterSpacing:"0.1em"}}>YOUR PROGRESS</span>
+                <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",color:"#77bbff"}}>{myWatched}/{totalEps} eps</span>
+              </div>
+              <div style={{height:4,background:"rgba(119,187,255,0.1)",borderRadius:2,overflow:"hidden"}}>
+                <div style={{height:"100%",background:"#77bbff",borderRadius:2,width:`${totalEps?(myWatched/totalEps)*100:0}%`,transition:"width 0.5s"}} />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Tab switcher */}
+        <div style={{display:"flex",borderBottom:`1px solid ${BORDER}`}}>
+          {["mine","group"].map(t=>(
+            <button key={t} onClick={()=>setTab(t)}
+              style={{flex:1,fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.12em",textTransform:"uppercase",padding:"10px",border:"none",borderBottom:`2px solid ${tab===t?"#77bbff":"transparent"}`,background:"transparent",color:tab===t?"#77bbff":MUTED,cursor:"pointer",transition:"all 0.15s"}}>
+              {t==="mine"?"My Progress":"Group Progress"}
+            </button>
+          ))}
+        </div>
+
+        {/* Seasons */}
+        <div style={{padding:16,display:"flex",flexDirection:"column",gap:8}}>
+          {seasons.length===0 ? (
+            <div style={{textAlign:"center",padding:24,fontFamily:"'Courier New',monospace",fontSize:"0.65rem",color:MUTED}}>Loading episode data...</div>
+          ) : seasons.map(season=>{
+            const isOpen = openSeason===season.season_number;
+            const done = isSeasonDone(season);
+            const mySeasonWatched = (season.episodes||[]).filter(e=>isEpWatched(season.season_number,e.episode_number)).length;
+            return (
+              <div key={season.season_number} style={{border:`1px solid ${done?"rgba(109,255,170,0.3)":BORDER}`,borderRadius:6,overflow:"hidden",background:done?"rgba(109,255,170,0.03)":"transparent"}}>
+                {/* Season header */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",cursor:"pointer",background:isOpen?(darkMode?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.03)"):"transparent"}}
+                  onClick={()=>setOpenSeason(isOpen?null:season.season_number)}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <span style={{fontSize:"0.85rem"}}>{isOpen?"▾":"▸"}</span>
+                    <span style={{fontFamily:"'Georgia',serif",fontSize:"0.85rem",fontWeight:"bold",color:FG}}>{season.name||`Season ${season.season_number}`}</span>
+                    <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:MUTED}}>{mySeasonWatched}/{season.episode_count||season.episodes?.length||0} eps</span>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    {done && <span style={{color:"#6dffaa",fontSize:"0.8rem"}}>✓</span>}
+                    {tab==="mine" && (
+                      <button onClick={e=>{e.stopPropagation();toggleSeason(season);}}
+                        style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"3px 8px",border:`1px solid ${done?"rgba(109,255,170,0.4)":"rgba(255,255,255,0.15)"}`,background:done?"rgba(109,255,170,0.1)":"transparent",color:done?"#6dffaa":MUTED,borderRadius:3,cursor:"pointer"}}>
+                        {done?"Unmark All":"Mark All"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {/* Episodes */}
+                {isOpen && (
+                  <div style={{borderTop:`1px solid ${BORDER}`,display:"flex",flexDirection:"column"}}>
+                    {(season.episodes||[]).map((ep,i)=>{
+                      const watched = isEpWatched(season.season_number, ep.episode_number);
+                      const gCount = groupEpCount(season.season_number, ep.episode_number);
+                      return (
+                        <div key={ep.episode_number}
+                          style={{display:"flex",alignItems:"center",gap:10,padding:"8px 14px",borderBottom:i<season.episodes.length-1?`1px solid ${BORDER}`:"none",transition:"background 0.12s",cursor:tab==="mine"?"pointer":"default"}}
+                          onClick={()=>tab==="mine"&&onEpisodeToggle(season.season_number,ep.episode_number,!watched)}
+                          onMouseEnter={e=>{if(tab==="mine")e.currentTarget.style.background=darkMode?"rgba(255,255,255,0.03)":"rgba(0,0,0,0.03)";}}
+                          onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                          {/* Checkbox */}
+                          {tab==="mine" && (
+                            <div style={{width:18,height:18,borderRadius:3,border:`1.5px solid ${watched?"#77bbff":"rgba(255,255,255,0.2)"}`,background:watched?"#77bbff":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.15s"}}>
+                              {watched&&<span style={{color:"#0a0a0d",fontSize:"0.65rem",fontWeight:"bold",lineHeight:1}}>✓</span>}
+                            </div>
+                          )}
+                          <div style={{flex:1,minWidth:0}}>
+                            <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",color:MUTED,marginRight:6}}>E{ep.episode_number}</span>
+                            <span style={{fontFamily:"'Georgia',serif",fontSize:"0.75rem",color:watched?MUTED:FG,textDecoration:watched?"line-through":"none",opacity:watched?0.6:1}}>{ep.name}</span>
+                          </div>
+                          {/* Group count */}
+                          {tab==="group" && gCount>0 && (
+                            <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:"#6dffaa",flexShrink:0}}>👥 {gCount}</span>
+                          )}
+                          {tab==="group" && gCount===0 && (
+                            <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:MUTED,flexShrink:0}}>--</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── WATCH PARTY ───────────────────────────────
 function WatchParty({ user, allFilms, onClose }) {
   const [screen, setScreen] = useState("lobby"); // lobby | room
@@ -1304,6 +1584,12 @@ export default function App() {
   const [dragOverIndex,setDragOverIndex]=useState(null);
   const [showWatchParty,setShowWatchParty]=useState(false);
   const [mobileMenuOpen,setMobileMenuOpen]=useState(false);
+  // TV shows
+  const [tvShows,setTvShows]=useState([]);
+  const [myEpisodeProgress,setMyEpisodeProgress]=useState({}); // {showTitle:{seasonNum:{epNum:bool}}}
+  const [groupEpisodeProgress,setGroupEpisodeProgress]=useState({}); // {showTitle:{userId:{seasonNum:{epNum:bool}}}}
+  const [selectedShow,setSelectedShow]=useState(null);
+  const [searchMode,setSearchMode]=useState("movie"); // movie | tv
   const [friendProfile,setFriendProfile]=useState(null); // {userId, displayName}
   const [watchTogether,setWatchTogether]=useState({});
   const [sharedCustomUrls,setSharedCustomUrls]=useState({});
@@ -1335,14 +1621,88 @@ export default function App() {
 
   useEffect(()=>{
     if(!user) return;
-    loadUserData();loadSharedFilms();loadFriendsData();loadFeed();
+    loadUserData();loadSharedFilms();loadFriendsData();loadFeed();loadTVShows();loadEpisodeProgress();
     const ch=supabase.channel("wq-rt")
       .on("postgres_changes",{event:"*",schema:"public",table:"user_films"},()=>{loadFriendsData();loadFeed();})
       .on("postgres_changes",{event:"*",schema:"public",table:"activity_feed"},()=>loadFeed())
       .on("postgres_changes",{event:"*",schema:"public",table:"shared_films"},()=>loadSharedFilms())
+      .on("postgres_changes",{event:"*",schema:"public",table:"shared_tv_shows"},()=>loadTVShows())
+      .on("postgres_changes",{event:"*",schema:"public",table:"user_episode_progress"},()=>loadEpisodeProgress())
       .subscribe();
     return()=>supabase.removeChannel(ch);
   },[user]);
+
+  async function loadTVShows(){
+    const{data}=await supabase.from("shared_tv_shows").select("*").order("created_at",{ascending:true});
+    setTvShows(data||[]);
+  }
+
+  async function loadEpisodeProgress(){
+    const{data}=await supabase.from("user_episode_progress").select("*");
+    if(!data) return;
+    // My progress
+    const mine={};
+    // Group progress
+    const group={};
+    data.forEach(row=>{
+      // Group
+      if(!group[row.show_title]) group[row.show_title]={};
+      if(!group[row.show_title][row.user_id]) group[row.show_title][row.user_id]={};
+      if(!group[row.show_title][row.user_id][row.season_number]) group[row.show_title][row.user_id][row.season_number]={};
+      group[row.show_title][row.user_id][row.season_number][row.episode_number]=row.watched;
+      // Mine
+      if(row.user_id===user.id){
+        if(!mine[row.show_title]) mine[row.show_title]={};
+        if(!mine[row.show_title][row.season_number]) mine[row.show_title][row.season_number]={};
+        mine[row.show_title][row.season_number][row.episode_number]=row.watched;
+      }
+    });
+    setMyEpisodeProgress(mine);
+    setGroupEpisodeProgress(group);
+  }
+
+  async function toggleEpisode(show, seasonNum, epNum, val){
+    const title=show.show_title;
+    // Optimistic update
+    setMyEpisodeProgress(prev=>{
+      const next={...prev};
+      if(!next[title]) next[title]={};
+      if(!next[title][seasonNum]) next[title][seasonNum]={};
+      next[title][seasonNum][epNum]=val;
+      return next;
+    });
+    if(val){
+      await supabase.from("user_episode_progress").upsert({user_id:user.id,show_title:title,season_number:seasonNum,episode_number:epNum,watched:true},{onConflict:"user_id,show_title,season_number,episode_number"});
+    } else {
+      await supabase.from("user_episode_progress").delete().eq("user_id",user.id).eq("show_title",title).eq("season_number",seasonNum).eq("episode_number",epNum);
+    }
+  }
+
+  async function addTVShow(page){
+    setAddInput("");setSearchOpen(false);
+    const dName=user.user_metadata?.display_name||user.email?.split("@")[0]||"someone";
+    showToast(`Fetching "${page.title}" from TMDB...`);
+    const tmdb=await fetchTMDBShow(page.title);
+    const{error}=await supabase.from("shared_tv_shows").upsert({
+      added_by:user.id, added_by_name:dName,
+      show_title:page.title,
+      poster_url:tmdb?.poster||"",
+      backdrop_url:tmdb?.backdrop||"",
+      summary:tmdb?.summary||(page.extract||"").slice(0,300),
+      tmdb_id:tmdb?.tmdb_id||null,
+      seasons:tmdb?.seasons||[],
+    },{onConflict:"show_title"});
+    if(error){ showToast("Could not add TV show"); return; }
+    await supabase.from("activity_feed").insert({user_id:user.id,display_name:dName,film_title:page.title,action:"added"});
+    showToast(`"${page.title}" added for everyone! 📺`);
+  }
+
+  async function removeTVShow(show){
+    if(show.added_by && show.added_by!==user.id){ showToast("Only the person who added this can remove it"); return; }
+    setTvShows(ts=>ts.filter(s=>s.show_title!==show.show_title));
+    await supabase.from("shared_tv_shows").delete().eq("show_title",show.show_title);
+    showToast(`"${show.show_title}" removed`);
+  }
 
   async function loadSharedFilms(){
     const{data}=await supabase.from("shared_films").select("*").order("created_at",{ascending:true});
@@ -1782,10 +2142,19 @@ export default function App() {
 
         {/* Row 1: Add + Reset */}
         <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+          {/* Movie / TV toggle */}
+          <div style={{display:"flex",borderRadius:4,overflow:"hidden",border:`1px solid rgba(128,128,128,0.2)`,flexShrink:0}}>
+            {[{k:"movie",l:"🎬 Movie"},{k:"tv",l:"📺 TV Show"}].map(m=>(
+              <button key={m.k} onClick={()=>setSearchMode(m.k)}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"6px 12px",border:"none",background:searchMode===m.k?"rgba(245,197,24,0.15)":"transparent",color:searchMode===m.k?"#f5c518":MUTED,cursor:"pointer",transition:"all 0.15s"}}>
+                {m.l}
+              </button>
+            ))}
+          </div>
           <div style={{flex:1,minWidth:200,position:"relative"}}>
             <div style={{display:"flex",alignItems:"center",gap:8,border:`1px dashed ${addInput?"rgba(245,197,24,0.4)":"rgba(245,197,24,0.18)"}`,borderRadius:4,padding:"7px 12px",background:addInput?"rgba(245,197,24,0.04)":"transparent",transition:"all 0.2s"}}>
-              <span style={{fontSize:"0.9rem",opacity:0.4}}>🔍</span>
-              <input value={addInput} onChange={e=>setAddInput(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){setAddInput("");setSearchOpen(false);}}} placeholder="Add a movie to the queue..."
+              <span style={{fontSize:"0.9rem",opacity:0.4}}>{searchMode==="tv"?"📺":"🔍"}</span>
+              <input value={addInput} onChange={e=>setAddInput(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){setAddInput("");setSearchOpen(false);}}} placeholder={searchMode==="tv"?"Add a TV show to the queue...":"Add a movie to the queue..."}
                 style={{flex:1,background:"none",border:"none",outline:"none",color:FG,fontFamily:"'Georgia',serif",fontSize:"0.85rem",minWidth:0}} />
             </div>
             {searchOpen&&(
@@ -1797,10 +2166,10 @@ export default function App() {
                 ):searchResults.length===0?(
                   <div style={{padding:14,textAlign:"center",fontFamily:"'Courier New',monospace",fontSize:"0.65rem",color:MUTED}}>No results found</div>
                 ):searchResults.map((page,i)=>(
-                  <div key={i} onClick={()=>addFromSearch(page)} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",cursor:"pointer",borderBottom:`1px solid rgba(128,128,128,0.08)`,transition:"background 0.12s"}}
+                  <div key={i} onClick={()=>searchMode==="tv"?addTVShow(page):addFromSearch(page)} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",cursor:"pointer",borderBottom:`1px solid rgba(128,128,128,0.08)`,transition:"background 0.12s"}}
                     onMouseEnter={e=>e.currentTarget.style.background="rgba(245,197,24,0.06)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                     <div style={{width:30,height:44,flexShrink:0,borderRadius:2,overflow:"hidden",background:"#0d0d18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:MUTED}}>
-                      {page.thumbnail?.source?<img src={page.thumbnail.source.replace(/\/\d+px-/,"/60px-")} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />:"🎬"}
+                      {page.thumbnail?.source?<img src={page.thumbnail.source.replace(/\/\d+px-/,"/60px-")} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />:(searchMode==="tv"?"📺":"🎬")}
                     </div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontFamily:"'Georgia',serif",fontSize:"0.8rem",color:FG,fontWeight:"bold",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{page.title}</div>
@@ -1912,6 +2281,27 @@ export default function App() {
         )}
       </div>
 
+      {/* ── TV SHOWS SECTION ── */}
+      {tvShows.length>0&&(
+        <div style={{maxWidth:1100,margin:"32px auto 0",padding:"0 24px 80px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+            <div style={{fontFamily:"'Impact','Arial Black',sans-serif",fontSize:"1rem",color:"#77bbff",textTransform:"uppercase",letterSpacing:"0.05em"}}>📺 TV Shows</div>
+            <div style={{flex:1,height:1,background:"rgba(119,187,255,0.15)"}} />
+            <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",color:MUTED}}>{tvShows.length} show{tvShows.length!==1?"s":""}</span>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:gridCols,gap:gridSize==="sm"?8:gridSize==="lg"?18:14}}>
+            {tvShows.map((show,i)=>(
+              <TVShowTile key={show.show_title} show={show} index={i}
+                myProgress={myEpisodeProgress[show.show_title]||{}}
+                groupProgress={groupEpisodeProgress[show.show_title]||{}}
+                onOpen={s=>setSelectedShow(s)}
+                onRemove={removeTVShow}
+                darkMode={darkMode} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Modal */}
       {selectedFilm&&(
         <FilmModal film={selectedFilm}
@@ -1934,6 +2324,18 @@ export default function App() {
           onStreamingChange={v=>saveStreamingLinks(selectedFilm.t,v,selectedFilm)}
           onDelete={()=>removeFilm(selectedFilm)}
           onClose={()=>setSelectedFilm(null)} />
+      )}
+
+      {/* TV Show Modal */}
+      {selectedShow&&(
+        <TVShowModal
+          show={selectedShow}
+          myProgress={myEpisodeProgress[selectedShow.show_title]||{}}
+          groupProgress={groupEpisodeProgress[selectedShow.show_title]||{}}
+          currentUser={user}
+          darkMode={darkMode}
+          onEpisodeToggle={(s,e,v)=>toggleEpisode(selectedShow,s,e,v)}
+          onClose={()=>setSelectedShow(null)} />
       )}
 
       {/* Friend Profile */}
