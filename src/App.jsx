@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = "https://xrpecvplexhyhuunmyiy.supabase.co";
@@ -246,6 +249,54 @@ function fmtTime12(t){
   const [h,m]=t.split(":").map(Number);
   const ampm=h>=12?"PM":"AM"; const h12=h%12===0?12:h%12;
   return `${h12}:${String(m).padStart(2,"0")} ${ampm}`;
+}
+
+// ── UP NEXT QUEUE HELPERS ─────────────────────
+const DEFAULT_MOVIE_RUNTIME = 100; // minutes, used when TMDB has no runtime
+const DEFAULT_EPISODE_RUNTIME = 45;
+async function fetchTMDBMovieRuntime(filmTitle){
+  try{
+    const headers={Authorization:`Bearer ${TMDB_TOKEN}`};
+    const title=cleanTitle(filmTitle); const year=extractYear(filmTitle);
+    const r=await fetch(`https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(title)}&language=en-US&page=1${year?`&year=${year}`:""}`,{headers});
+    const d=await r.json();
+    const id=d.results?.[0]?.id; if(!id) return null;
+    const r2=await fetch(`https://api.themoviedb.org/3/movie/${id}?language=en-US`,{headers});
+    const d2=await r2.json();
+    return d2.runtime||null;
+  }catch(_){ return null; }
+}
+async function fetchTMDBEpisodeRuntime(showTitle, seasonNum, epNum){
+  try{
+    const headers={Authorization:`Bearer ${TMDB_TOKEN}`};
+    const r=await fetch(`https://api.themoviedb.org/3/search/tv?query=${encodeURIComponent(cleanTitle(showTitle))}&language=en-US&page=1`,{headers});
+    const d=await r.json();
+    const id=d.results?.[0]?.id; if(!id) return null;
+    const r2=await fetch(`https://api.themoviedb.org/3/tv/${id}/season/${seasonNum}/episode/${epNum}?language=en-US`,{headers});
+    const d2=await r2.json();
+    return d2.runtime||null;
+  }catch(_){ return null; }
+}
+function findNextEpisode(seasons, seasonNum, epNum){
+  const season = (seasons||[]).find(s=>s.season_number===seasonNum);
+  if(season){
+    const ep = season.episodes?.find(e=>e.episode_number===epNum+1);
+    if(ep) return { season_number:seasonNum, episode_number:epNum+1, name:ep.name };
+  }
+  const nextSeason = (seasons||[]).find(s=>s.season_number===seasonNum+1);
+  if(nextSeason && nextSeason.episodes?.length){
+    const ep = nextSeason.episodes[0];
+    return { season_number:seasonNum+1, episode_number:ep.episode_number, name:ep.name };
+  }
+  return null;
+}
+function fmtRuntime(mins){
+  if(!mins) return "0m";
+  const h=Math.floor(mins/60), m=mins%60;
+  return h>0 ? `${h}h ${m}m` : `${m}m`;
+}
+function fmtClockTime(date){
+  return date.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"});
 }
 
 // ── STREAMING PLATFORMS ──────────────────────
@@ -723,7 +774,7 @@ function PosterTile({ film, isWatched, friendsWatched, rating, streamingLinks, o
 }
 
 // ── FILM MODAL ────────────────────────────────
-function FilmModal({ film, isWatched, note, rating, streamingLinks, friendsWatched, friendsRatings, onToggle, onNoteChange, onRatingChange, onStreamingChange, onDelete, onClose, isCustom, currentUser, darkMode, watchTogether, onWatchTogetherChange, sharedCustomUrl, onSharedCustomUrlChange }) {
+function FilmModal({ film, isWatched, note, rating, streamingLinks, friendsWatched, friendsRatings, onToggle, onNoteChange, onRatingChange, onStreamingChange, onDelete, onClose, isCustom, currentUser, darkMode, watchTogether, onWatchTogetherChange, sharedCustomUrl, onSharedCustomUrlChange, onAddToUpNext }) {
   const [localNote,setLocalNote]=useState(note||"");
   const [posterSrc,setPosterSrc]=useState(film.posterUrl||null);
   const [posterLoaded,setPosterLoaded]=useState(false);
@@ -784,6 +835,14 @@ function FilmModal({ film, isWatched, note, rating, streamingLinks, friendsWatch
                 👥 {watchTogether?"Want to Watch Together":"Watch Together?"}
               </button>
             </div>
+            {onAddToUpNext&&(
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <button onClick={()=>onAddToUpNext("top")}
+                  style={{display:"inline-flex",alignItems:"center",gap:5,fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"5px 12px",borderRadius:3,border:"1px solid rgba(109,255,170,0.35)",background:"rgba(109,255,170,0.08)",color:"#6dffaa",cursor:"pointer",transition:"all 0.15s"}}>⏭ Play Next</button>
+                <button onClick={()=>onAddToUpNext("bottom")}
+                  style={{display:"inline-flex",alignItems:"center",gap:5,fontFamily:"'Courier New',monospace",fontSize:"0.6rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"5px 12px",borderRadius:3,border:"1px solid rgba(255,255,255,0.12)",background:"transparent",color:"#4a4a5e",cursor:"pointer",transition:"all 0.15s"}}>➕ Add to Queue</button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -1299,7 +1358,7 @@ function TVAddPickerModal({ page, tmdb, onConfirm, onCancel, darkMode }) {
 }
 
 // ── TV SHOW MODAL ──────────────────────────────
-function TVShowModal({ show, myProgress, groupProgress, currentUser, onEpisodeToggle, onClose, darkMode }) {
+function TVShowModal({ show, myProgress, groupProgress, currentUser, onEpisodeToggle, onAddEpisodeToQueue, onClose, darkMode }) {
   const [openSeason, setOpenSeason] = useState(null);
   const [tab, setTab] = useState("mine"); // mine | group
   const BG = darkMode ? "#111116" : "#fff";
@@ -1433,6 +1492,15 @@ function TVShowModal({ show, myProgress, groupProgress, currentUser, onEpisodeTo
                           )}
                           {tab==="group" && gCount===0 && (
                             <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:MUTED,flexShrink:0}}>--</span>
+                          )}
+                          {/* Queue quick-add (mine tab only) */}
+                          {tab==="mine" && onAddEpisodeToQueue && (
+                            <div style={{display:"flex",gap:4,flexShrink:0}}>
+                              <button onClick={e=>{e.stopPropagation();onAddEpisodeToQueue(season.season_number,ep.episode_number,ep.name,"top");}} title="Play Next"
+                                style={{background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.3)",borderRadius:3,width:22,height:22,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#6dffaa",fontSize:"0.6rem"}}>⏭</button>
+                              <button onClick={e=>{e.stopPropagation();onAddEpisodeToQueue(season.season_number,ep.episode_number,ep.name,"bottom");}} title="Add to Queue"
+                                style={{background:"none",border:`1px solid ${BORDER}`,borderRadius:3,width:22,height:22,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:MUTED,fontSize:"0.6rem"}}>➕</button>
+                            </div>
                           )}
                         </div>
                       );
@@ -2089,6 +2157,245 @@ function CalendarModal({ scheduledItems, tvShowOptions, allMovies, darkMode, onS
   );
 }
 
+// ── SORTABLE QUEUE ROW ─────────────────────────
+function SortableQueueRow({ item, isFirst, onRemove, onMarkWatched, darkMode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
+  const FG = darkMode ? "#ede0cc" : "#1a1a1a";
+  const MUTED = darkMode ? "#4a4a5e" : "#888";
+  const BORDER = darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+  const ACCENT = "#6dffaa";
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style}
+      className="wq-queue-row"
+      >
+      <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:8,border:`1px solid ${isFirst?"rgba(109,255,170,0.4)":BORDER}`,background:isFirst?"rgba(109,255,170,0.06)":(darkMode?"rgba(255,255,255,0.02)":"rgba(0,0,0,0.02)"),marginBottom:8}}>
+        {/* Drag handle */}
+        <div {...attributes} {...listeners} style={{cursor:"grab",color:MUTED,fontSize:"1rem",padding:"4px 2px",touchAction:"none",flexShrink:0}}>⠿</div>
+
+        {/* Poster thumb */}
+        <div style={{width:34,height:50,flexShrink:0,borderRadius:3,overflow:"hidden",background:"#0d0d18",display:"flex",alignItems:"center",justifyContent:"center"}}>
+          {item.poster_url ? <img src={item.poster_url} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} /> : <span style={{fontSize:"0.8rem",opacity:0.3}}>{item.item_type==="movie"?"🎬":"📺"}</span>}
+        </div>
+
+        {/* Info */}
+        <div style={{flex:1,minWidth:0}}>
+          {isFirst && <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.5rem",letterSpacing:"0.12em",color:ACCENT,marginBottom:2}}>▶ NOW PLAYING</div>}
+          <div style={{fontFamily:"'Georgia',serif",fontSize:"0.82rem",color:FG,fontWeight:isFirst?"bold":"normal",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.item_title}</div>
+          <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:MUTED,marginTop:2}}>{fmtRuntime(item.runtime_minutes)}</div>
+        </div>
+
+        {/* Actions */}
+        <button onClick={()=>onMarkWatched(item)} title="Mark watched"
+          style={{background:"rgba(109,255,170,0.12)",border:"1px solid rgba(109,255,170,0.35)",borderRadius:"50%",width:30,height:30,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:ACCENT,fontSize:"0.85rem",flexShrink:0}}>✓</button>
+        <button onClick={()=>onRemove(item.id)} title="Remove"
+          style={{background:"none",border:"none",color:MUTED,fontSize:"0.9rem",cursor:"pointer",flexShrink:0,padding:"4px"}}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+// ── UP NEXT QUEUE MODAL ────────────────────────
+function UpNextQueueModal({ queues, allItems, watchedTodayLog, darkMode, onCreateQueue, onRenameQueue, onSetActive, onDeleteQueue, onReorder, onRemove, onClear, onCompleteItem, onAddNextEpisode, onClose }) {
+  const [confirmClear,setConfirmClear]=useState(false);
+  const [nextEpisodeOffer,setNextEpisodeOffer]=useState(null); // {show, next}
+  const [now,setNow]=useState(new Date());
+  const activeQueue = queues.find(q=>q.is_active) || queues[0];
+  const [viewedQueueId,setViewedQueueId]=useState(activeQueue?.id||null);
+  const [creatingQueue,setCreatingQueue]=useState(false);
+  const [newQueueName,setNewQueueName]=useState("");
+  const [renamingId,setRenamingId]=useState(null);
+  const [renameValue,setRenameValue]=useState("");
+  const [confirmDeleteId,setConfirmDeleteId]=useState(null);
+  const BG=darkMode?"#0a0a0d":"#f4f0e8"; const FG=darkMode?"#ede0cc":"#1a1a1a"; const MUTED=darkMode?"#4a4a5e":"#888"; const BORDER=darkMode?"rgba(255,255,255,0.08)":"rgba(0,0,0,0.08)"; const CARD=darkMode?"#111116":"#fff";
+  const ACCENT="#6dffaa";
+
+  useEffect(()=>{ if(!viewedQueueId && activeQueue) setViewedQueueId(activeQueue.id); },[activeQueue,viewedQueueId]);
+  useEffect(()=>{ const t=setInterval(()=>setNow(new Date()),60000); return()=>clearInterval(t); },[]);
+  useEffect(()=>{ const h=e=>{ if(e.key==="Escape") onClose(); }; window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h); },[onClose]);
+
+  const sensors = useSensors(useSensor(PointerSensor,{activationConstraint:{distance:5}}));
+
+  const viewedQueue = queues.find(q=>q.id===viewedQueueId) || activeQueue;
+  const items = allItems.filter(i=>i.queue_id===viewedQueue?.id).sort((a,b)=>a.position-b.position);
+  const isViewingActive = viewedQueue?.id === activeQueue?.id;
+
+  function handleDragEnd(event){
+    const {active,over} = event;
+    if(!over || active.id===over.id) return;
+    const oldIndex = items.findIndex(q=>q.id===active.id);
+    const newIndex = items.findIndex(q=>q.id===over.id);
+    onReorder(arrayMove(items,oldIndex,newIndex).map(q=>q.id));
+  }
+
+  const totalRuntime = items.reduce((a,q)=>a+(q.runtime_minutes||0),0);
+  const finishTime = new Date(now.getTime()+totalRuntime*60000);
+
+  async function handleMarkWatched(item){
+    const result = await onCompleteItem(item);
+    if(result) setNextEpisodeOffer(result);
+  }
+
+  function submitNewQueue(){
+    if(!newQueueName.trim()) return;
+    onCreateQueue(newQueueName);
+    setNewQueueName(""); setCreatingQueue(false);
+  }
+  function submitRename(id){
+    if(!renameValue.trim()){ setRenamingId(null); return; }
+    onRenameQueue(id, renameValue);
+    setRenamingId(null);
+  }
+
+  return (
+    <div onClick={e=>e.target===e.currentTarget&&onClose()}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",zIndex:20500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(10px)"}}>
+      <div style={{background:BG,border:`1px solid ${ACCENT}33`,borderRadius:10,width:"100%",maxWidth:560,maxHeight:"90vh",overflowY:"auto",position:"relative",animation:"modalIn 0.25s cubic-bezier(0.34,1.56,0.64,1)"}}>
+
+        {/* Header */}
+        <div style={{position:"sticky",top:0,zIndex:2,background:BG,padding:"18px 20px 14px",borderBottom:`1px solid ${BORDER}`}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+            <span style={{fontFamily:"'Impact','Arial Black',sans-serif",fontSize:"1.3rem",color:ACCENT}}>🎧 Queues</span>
+            <button onClick={onClose} style={{background:"none",border:"none",color:MUTED,fontSize:"1.1rem",cursor:"pointer"}}>✕</button>
+          </div>
+
+          {/* Playlist pills */}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
+            {queues.map(q=>(
+              <div key={q.id} style={{display:"flex",alignItems:"center",gap:4}}>
+                {renamingId===q.id ? (
+                  <input autoFocus value={renameValue} onChange={e=>setRenameValue(e.target.value)}
+                    onKeyDown={e=>{ if(e.key==="Enter") submitRename(q.id); if(e.key==="Escape") setRenamingId(null); }}
+                    onBlur={()=>submitRename(q.id)}
+                    style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",padding:"6px 10px",borderRadius:14,border:`1px solid ${ACCENT}`,background:darkMode?"#0d0d18":"#fff",color:FG,outline:"none",width:120}} />
+                ) : (
+                  <button onClick={()=>setViewedQueueId(q.id)} onDoubleClick={()=>{setRenamingId(q.id);setRenameValue(q.name);}}
+                    title="Click to view · double-click to rename"
+                    style={{display:"flex",alignItems:"center",gap:5,fontFamily:"'Courier New',monospace",fontSize:"0.62rem",padding:"6px 12px",borderRadius:14,border:`1px solid ${viewedQueueId===q.id?ACCENT:BORDER}`,background:viewedQueueId===q.id?`${ACCENT}18`:"transparent",color:viewedQueueId===q.id?ACCENT:MUTED,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    {q.is_active && <span title="Active queue">⭐</span>}
+                    {q.name}
+                  </button>
+                )}
+              </div>
+            ))}
+            {!creatingQueue ? (
+              <button onClick={()=>setCreatingQueue(true)}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",padding:"6px 12px",borderRadius:14,border:`1px dashed ${BORDER}`,background:"transparent",color:MUTED,cursor:"pointer"}}>+ New</button>
+            ) : (
+              <input autoFocus value={newQueueName} onChange={e=>setNewQueueName(e.target.value)} placeholder="Queue name..."
+                onKeyDown={e=>{ if(e.key==="Enter") submitNewQueue(); if(e.key==="Escape") setCreatingQueue(false); }}
+                onBlur={submitNewQueue}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",padding:"6px 10px",borderRadius:14,border:`1px solid ${ACCENT}`,background:darkMode?"#0d0d18":"#fff",color:FG,outline:"none",width:130}} />
+            )}
+          </div>
+
+          {/* Viewed queue actions row */}
+          {viewedQueue && (
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+              <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",color:MUTED}}>
+                {items.length} item{items.length!==1?"s":""} · {fmtRuntime(totalRuntime)}
+                {totalRuntime>0 && isViewingActive && <span style={{color:ACCENT}}> · Finishes around {fmtClockTime(finishTime)}</span>}
+              </div>
+              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                {!isViewingActive && (
+                  <button onClick={()=>onSetActive(viewedQueue.id)}
+                    style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"5px 10px",borderRadius:4,border:`1px solid ${ACCENT}`,background:"transparent",color:ACCENT,cursor:"pointer"}}>
+                    ⭐ Set Active
+                  </button>
+                )}
+                {queues.length>1 && confirmDeleteId!==viewedQueue.id && (
+                  <button onClick={()=>setConfirmDeleteId(viewedQueue.id)}
+                    style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"5px 10px",borderRadius:4,border:`1px solid ${BORDER}`,background:"transparent",color:MUTED,cursor:"pointer"}}>
+                    Delete Queue
+                  </button>
+                )}
+                {confirmDeleteId===viewedQueue.id && (
+                  <>
+                    <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:"#e63946"}}>Delete "{viewedQueue.name}"?</span>
+                    <button onClick={()=>{onDeleteQueue(viewedQueue.id);setConfirmDeleteId(null);setViewedQueueId(null);}}
+                      style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"5px 10px",borderRadius:4,border:"none",background:"#e63946",color:"#fff",cursor:"pointer"}}>Yes</button>
+                    <button onClick={()=>setConfirmDeleteId(null)}
+                      style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",padding:"5px 10px",borderRadius:4,border:`1px solid ${BORDER}`,background:"transparent",color:MUTED,cursor:"pointer"}}>Cancel</button>
+                  </>
+                )}
+                {items.length>0 && !confirmClear && confirmDeleteId!==viewedQueue.id && (
+                  <button onClick={()=>setConfirmClear(true)}
+                    style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"5px 10px",borderRadius:4,border:"1px solid rgba(230,57,70,0.3)",background:"transparent",color:"#e63946",cursor:"pointer"}}>
+                    Clear Queue
+                  </button>
+                )}
+                {confirmClear && (
+                  <>
+                    <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:"#e63946"}}>Clear all {items.length}?</span>
+                    <button onClick={()=>{onClear(viewedQueue.id);setConfirmClear(false);}}
+                      style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"5px 10px",borderRadius:4,border:"none",background:"#e63946",color:"#fff",cursor:"pointer"}}>Yes, Clear</button>
+                    <button onClick={()=>setConfirmClear(false)}
+                      style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",padding:"5px 10px",borderRadius:4,border:`1px solid ${BORDER}`,background:"transparent",color:MUTED,cursor:"pointer"}}>Cancel</button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Next-episode offer */}
+        {nextEpisodeOffer && (
+          <div style={{margin:"14px 20px 0",padding:"12px 14px",borderRadius:6,border:"1px solid rgba(119,187,255,0.35)",background:"rgba(119,187,255,0.08)"}}>
+            <div style={{fontFamily:"'Georgia',serif",fontSize:"0.78rem",color:FG,marginBottom:8}}>
+              Add <b>S{nextEpisodeOffer.next.season_number}E{nextEpisodeOffer.next.episode_number}{nextEpisodeOffer.next.name?`: ${nextEpisodeOffer.next.name}`:""}</b> of {nextEpisodeOffer.show?.show_title} to the active queue?
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{ onAddNextEpisode(nextEpisodeOffer.show, nextEpisodeOffer.next); setNextEpisodeOffer(null); }}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"7px 14px",borderRadius:4,border:"none",background:"#77bbff",color:"#0a0a0d",fontWeight:"bold",cursor:"pointer"}}>Yes, Play Next</button>
+              <button onClick={()=>setNextEpisodeOffer(null)}
+                style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.08em",textTransform:"uppercase",padding:"7px 14px",borderRadius:4,border:`1px solid ${BORDER}`,background:"transparent",color:MUTED,cursor:"pointer"}}>No Thanks</button>
+            </div>
+          </div>
+        )}
+
+        {/* Queue list */}
+        <div style={{padding:"16px 20px 8px"}}>
+          {items.length===0 ? (
+            <div style={{textAlign:"center",padding:"30px 0",fontFamily:"'Courier New',monospace",fontSize:"0.65rem",color:MUTED,lineHeight:1.8}}>
+              This queue is empty.<br/>Add movies or episodes with "Play Next" or "Add to Queue" from their pages{!isViewingActive?" (they go to the ⭐ active queue)":""}.
+            </div>
+          ) : (
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={items.map(q=>q.id)} strategy={verticalListSortingStrategy}>
+                {items.map((item,i)=>(
+                  <SortableQueueRow key={item.id} item={item} isFirst={i===0 && isViewingActive} onRemove={onRemove} onMarkWatched={handleMarkWatched} darkMode={darkMode} />
+                ))}
+              </SortableContext>
+            </DndContext>
+          )}
+        </div>
+
+        {/* Watched today */}
+        {watchedTodayLog.length>0 && (
+          <div style={{padding:"8px 20px 20px",borderTop:`1px solid ${BORDER}`,marginTop:8}}>
+            <div style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.15em",color:MUTED,textTransform:"uppercase",margin:"12px 0 8px"}}>Watched Today</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {watchedTodayLog.map((w,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 8px",borderRadius:6,background:darkMode?"rgba(255,255,255,0.02)":"rgba(0,0,0,0.02)"}}>
+                  <span style={{fontSize:"0.75rem",opacity:0.6}}>{w.item_type==="movie"?"🎬":"📺"}</span>
+                  <span style={{fontFamily:"'Georgia',serif",fontSize:"0.72rem",color:FG,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{w.item_title}</span>
+                  <span style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",color:MUTED}}>{new Date(w.watched_at).toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── MAIN APP ──────────────────────────────────
 export default function App() {
   const [user,setUser]=useState(null);
@@ -2123,6 +2430,10 @@ export default function App() {
   const [tvAddPicker,setTvAddPicker]=useState(null); // {page, tmdb}
   const [showCalendar,setShowCalendar]=useState(false);
   const [scheduledItems,setScheduledItems]=useState([]);
+  const [showUpNext,setShowUpNext]=useState(false);
+  const [watchQueues,setWatchQueues]=useState([]); // playlists
+  const [queueItems,setQueueItems]=useState([]); // all items, all queues
+  const [watchedTodayLog,setWatchedTodayLog]=useState([]);
   const [friendProfile,setFriendProfile]=useState(null); // {userId, displayName}
   const [watchTogether,setWatchTogether]=useState({});
   const [sharedCustomUrls,setSharedCustomUrls]=useState({});
@@ -2154,7 +2465,7 @@ export default function App() {
 
   useEffect(()=>{
     if(!user) return;
-    loadUserData();loadSharedFilms();loadFriendsData();loadFeed();loadTVShows();loadEpisodeProgress();loadScheduledItems();
+    loadUserData();loadSharedFilms();loadFriendsData();loadFeed();loadTVShows();loadEpisodeProgress();loadScheduledItems();loadWatchQueues();loadQueueItems();loadWatchedTodayLog();
     const ch=supabase.channel("wq-rt")
       .on("postgres_changes",{event:"*",schema:"public",table:"user_films"},()=>{loadFriendsData();loadFeed();})
       .on("postgres_changes",{event:"*",schema:"public",table:"activity_feed"},()=>loadFeed())
@@ -2162,9 +2473,155 @@ export default function App() {
       .on("postgres_changes",{event:"*",schema:"public",table:"shared_tv_shows"},()=>loadTVShows())
       .on("postgres_changes",{event:"*",schema:"public",table:"user_episode_progress"},()=>loadEpisodeProgress())
       .on("postgres_changes",{event:"*",schema:"public",table:"scheduled_items"},()=>loadScheduledItems())
+      .on("postgres_changes",{event:"*",schema:"public",table:"watch_queues"},()=>loadWatchQueues())
+      .on("postgres_changes",{event:"*",schema:"public",table:"queue_items"},()=>loadQueueItems())
+      .on("postgres_changes",{event:"*",schema:"public",table:"queue_watched_log"},()=>loadWatchedTodayLog())
       .subscribe();
     return()=>supabase.removeChannel(ch);
   },[user]);
+
+  async function loadWatchQueues(){
+    const{data}=await supabase.from("watch_queues").select("*").order("created_at",{ascending:true});
+    let list = data||[];
+    if(list.length===0){
+      const dName=user.user_metadata?.display_name||user.email?.split("@")[0]||"someone";
+      const{data:created}=await supabase.from("watch_queues").insert({name:"Up Next", is_active:true, created_by:user.id, created_by_name:dName}).select().single();
+      list = created ? [created] : [];
+    } else if(!list.some(q=>q.is_active)){
+      await supabase.from("watch_queues").update({is_active:true}).eq("id",list[0].id);
+      list = list.map((q,i)=>i===0?{...q,is_active:true}:q);
+    }
+    setWatchQueues(list);
+  }
+
+  async function loadQueueItems(){
+    const{data}=await supabase.from("queue_items").select("*").order("position",{ascending:true});
+    setQueueItems(data||[]);
+  }
+
+  async function loadWatchedTodayLog(){
+    const{data}=await supabase.from("queue_watched_log").select("*").order("watched_at",{ascending:false}).limit(60);
+    const todayStr=fmtDate(new Date());
+    setWatchedTodayLog((data||[]).filter(r=>r.watched_at?.slice(0,10)===todayStr));
+  }
+
+  function getActiveQueue(){ return watchQueues.find(q=>q.is_active) || watchQueues[0] || null; }
+
+  async function createWatchQueue(name){
+    const dName=user.user_metadata?.display_name||user.email?.split("@")[0]||"someone";
+    await supabase.from("watch_queues").insert({name:name.trim()||"New Queue", is_active:false, created_by:user.id, created_by_name:dName});
+    loadWatchQueues();
+  }
+
+  async function renameWatchQueue(id,name){
+    await supabase.from("watch_queues").update({name:name.trim()||"Untitled"}).eq("id",id);
+    loadWatchQueues();
+  }
+
+  async function setActiveWatchQueue(id){
+    await Promise.all(watchQueues.filter(q=>q.id!==id).map(q=>supabase.from("watch_queues").update({is_active:false}).eq("id",q.id)));
+    await supabase.from("watch_queues").update({is_active:true}).eq("id",id);
+    loadWatchQueues();
+  }
+
+  async function deleteWatchQueue(id){
+    const wasActive = watchQueues.find(q=>q.id===id)?.is_active;
+    await supabase.from("watch_queues").delete().eq("id",id); // cascades to its items
+    if(wasActive){
+      const remaining = watchQueues.filter(q=>q.id!==id);
+      if(remaining.length) await supabase.from("watch_queues").update({is_active:true}).eq("id",remaining[0].id);
+    }
+    loadWatchQueues(); loadQueueItems();
+    showToast("Queue deleted");
+  }
+
+  async function addToQueue(item, mode, queueId){
+    const targetQueueId = queueId || getActiveQueue()?.id;
+    if(!targetQueueId){ showToast("No queue to add to"); return; }
+    const dName=user.user_metadata?.display_name||user.email?.split("@")[0]||"someone";
+    let runtime = item.runtime_minutes;
+    if(!runtime){
+      runtime = item.item_type==="movie"
+        ? await fetchTMDBMovieRuntime(item.ref_title)
+        : await fetchTMDBEpisodeRuntime(item.ref_title, item.ref_season, item.ref_episode);
+      if(!runtime) runtime = item.item_type==="movie" ? DEFAULT_MOVIE_RUNTIME : DEFAULT_EPISODE_RUNTIME;
+    }
+    let poster_url = item.poster_url;
+    if(!poster_url && item.item_type==="movie"){
+      poster_url = await fetchTMDBPoster(item.ref_title,"w200") || "";
+    }
+    if(mode==="top"){
+      const{data:current}=await supabase.from("queue_items").select("id,position").eq("queue_id",targetQueueId);
+      await Promise.all((current||[]).map(q=>supabase.from("queue_items").update({position:q.position+1}).eq("id",q.id)));
+      await supabase.from("queue_items").insert({queue_id:targetQueueId, added_by:user.id, added_by_name:dName, position:0, ...item, poster_url, runtime_minutes:runtime});
+      showToast(`▶ "${item.item_title}" is up next!`);
+    } else {
+      const{data:current}=await supabase.from("queue_items").select("position").eq("queue_id",targetQueueId).order("position",{ascending:false}).limit(1);
+      const nextPos = current?.[0] ? current[0].position+1 : 0;
+      await supabase.from("queue_items").insert({queue_id:targetQueueId, added_by:user.id, added_by_name:dName, position:nextPos, ...item, poster_url, runtime_minutes:runtime});
+      showToast(`+ "${item.item_title}" added to queue`);
+    }
+    loadQueueItems();
+  }
+
+  async function removeQueueItem(id){
+    setQueueItems(q=>q.filter(x=>x.id!==id));
+    await supabase.from("queue_items").delete().eq("id",id);
+  }
+
+  async function clearQueueItems(queueId){
+    setQueueItems(q=>q.filter(x=>x.queue_id!==queueId));
+    await supabase.from("queue_items").delete().eq("queue_id",queueId);
+    showToast("Queue cleared for everyone");
+  }
+
+  async function reorderQueueItems(orderedIds){
+    setQueueItems(prev=>{
+      const map=Object.fromEntries(prev.map(q=>[q.id,q]));
+      const others = prev.filter(q=>!orderedIds.includes(q.id));
+      return [...others, ...orderedIds.map((id,i)=>({...map[id],position:i}))];
+    });
+    await Promise.all(orderedIds.map((id,i)=>supabase.from("queue_items").update({position:i}).eq("id",id)));
+  }
+
+  async function markFilmWatchedDirect(film){
+    const title=film.t;
+    setWatched(w=>({...w,[title]:true}));
+    await supabase.from("user_films").upsert({user_id:user.id,film_title:title,watched:true,emoji:film.e||"🎬",is_custom:!!film._custom},{onConflict:"user_id,film_title"});
+    burst(window.innerWidth/2,window.innerHeight/2);
+    await supabase.from("activity_feed").insert({user_id:user.id,display_name:user.user_metadata?.display_name||"someone",film_title:title,action:"watched"});
+  }
+
+  async function completeQueueItem(item){
+    const dName=user.user_metadata?.display_name||user.email?.split("@")[0]||"someone";
+    if(item.item_type==="movie"){
+      const filmObj = allFilms.find(f=>f.t===item.ref_title) || {t:item.ref_title, e:"🎬"};
+      await markFilmWatchedDirect(filmObj);
+    } else {
+      await toggleEpisode({show_title:item.ref_title}, item.ref_season, item.ref_episode, true);
+    }
+    await supabase.from("queue_items").delete().eq("id",item.id);
+    await supabase.from("queue_watched_log").insert({watched_by:user.id, watched_by_name:dName, item_title:item.item_title,item_type:item.item_type,poster_url:item.poster_url});
+    loadQueueItems(); loadWatchedTodayLog();
+    if(item.item_type==="tv_episode"){
+      const matches = tvShows.filter(s=>s.show_title===item.ref_title);
+      const showRow = matches.sort((a,b)=>(b.seasons?.length||0)-(a.seasons?.length||0))[0];
+      const next = showRow ? findNextEpisode(showRow.seasons, item.ref_season, item.ref_episode) : null;
+      return next ? { show:showRow, next } : null;
+    }
+    return null;
+  }
+
+  async function addNextEpisodeToQueue(showRow, next, queueId){
+    await addToQueue({
+      item_type:"tv_episode",
+      item_title:`${showRow.show_title} — S${next.season_number}E${next.episode_number}${next.name?`: ${next.name}`:""}`,
+      ref_title: showRow.show_title,
+      ref_season: next.season_number,
+      ref_episode: next.episode_number,
+      poster_url: showRow.poster_url||"",
+    }, "top", queueId);
+  }
 
   async function loadScheduledItems(){
     const{data}=await supabase.from("scheduled_items").select("*").order("scheduled_date",{ascending:true});
@@ -2678,6 +3135,9 @@ export default function App() {
               <button onClick={copyLink} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(230,57,70,0.35)",color:"#e63946",borderRadius:3,padding:"5px 12px",cursor:"pointer"}}>Share</button>
               <button onClick={()=>setShowWatchParty(true)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>🎉 Watch Party</button>
               <button onClick={()=>setShowCalendar(true)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(185,142,255,0.1)",border:"1px solid rgba(185,142,255,0.35)",color:"#b98eff",borderRadius:3,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>📅 Calendar</button>
+              <button onClick={()=>setShowUpNext(true)} style={{fontFamily:"'Courier New',monospace",fontSize:"0.58rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                🎧 Up Next{(()=>{const c=queueItems.filter(i=>i.queue_id===getActiveQueue()?.id).length; return c>0&&<span style={{background:"#6dffaa",color:"#0a0a0d",borderRadius:8,padding:"0 5px",fontSize:"0.55rem",fontWeight:"bold"}}>{c}</span>;})()}
+              </button>
               <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:4}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#793473,#f5c518)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Impact',sans-serif",fontSize:"0.8rem",color:"#0a0a0d",fontWeight:900,flexShrink:0}}>{displayName.charAt(0).toUpperCase()}</div>
                 <button onClick={signOut} style={{fontFamily:"'Courier New',monospace",fontSize:"0.55rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(128,128,128,0.2)",color:MUTED,borderRadius:3,padding:"3px 8px",cursor:"pointer"}}>Out</button>
@@ -2707,6 +3167,7 @@ export default function App() {
               <button onClick={()=>{copyLink();setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(230,57,70,0.35)",color:"#e63946",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>Share</button>
               <button onClick={()=>{setShowWatchParty(true);setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>🎉 Watch Party</button>
               <button onClick={()=>{setShowCalendar(true);setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(185,142,255,0.1)",border:"1px solid rgba(185,142,255,0.35)",color:"#b98eff",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>📅 Calendar</button>
+              <button onClick={()=>{setShowUpNext(true);setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"rgba(109,255,170,0.1)",border:"1px solid rgba(109,255,170,0.35)",color:"#6dffaa",borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>🎧 Up Next{(()=>{const c=queueItems.filter(i=>i.queue_id===getActiveQueue()?.id).length; return c>0?` (${c})`:"";})()}</button>
               <button onClick={()=>{signOut();setMobileMenuOpen(false);}} style={{fontFamily:"'Courier New',monospace",fontSize:"0.62rem",letterSpacing:"0.1em",textTransform:"uppercase",background:"transparent",border:"1px solid rgba(128,128,128,0.2)",color:MUTED,borderRadius:3,padding:"8px 14px",cursor:"pointer",flex:1}}>Sign Out</button>
             </div>
             {/* User display */}
@@ -2913,6 +3374,10 @@ export default function App() {
           onWatchTogetherChange={v=>saveWatchTogether(selectedFilm.t,v)}
           sharedCustomUrl={sharedCustomUrls[selectedFilm.t]||""}
           onSharedCustomUrlChange={url=>saveSharedCustomUrl(selectedFilm.t,url)}
+          onAddToUpNext={mode=>{
+            const custom = customFilms.find(f=>f.t===selectedFilm.t);
+            addToQueue({ item_type:"movie", item_title:selectedFilm.t, ref_title:selectedFilm.t, ref_season:null, ref_episode:null, poster_url:custom?.posterUrl||"" }, mode, getActiveQueue()?.id);
+          }}
           onToggle={()=>{toggleWatched(selectedFilm);setSelectedFilm(null);}}
           onNoteChange={v=>saveNote(selectedFilm.t,v)}
           onRatingChange={v=>saveRating(selectedFilm.t,v,selectedFilm)}
@@ -2930,6 +3395,14 @@ export default function App() {
           currentUser={user}
           darkMode={darkMode}
           onEpisodeToggle={(s,e,v)=>toggleEpisode(selectedShow,s,e,v)}
+          onAddEpisodeToQueue={(s,e,name,mode)=>{
+            addToQueue({
+              item_type:"tv_episode",
+              item_title:`${selectedShow.show_title} — S${s}E${e}${name?`: ${name}`:""}`,
+              ref_title:selectedShow.show_title, ref_season:s, ref_episode:e,
+              poster_url:selectedShow.poster_url||"",
+            }, mode, getActiveQueue()?.id);
+          }}
           onClose={()=>setSelectedShow(null)} />
       )}
 
@@ -2971,6 +3444,25 @@ export default function App() {
           onDeleteSeries={deleteScheduledSeries}
           onSkipOccurrence={skipScheduledOccurrence}
           onClose={()=>setShowCalendar(false)} />
+      )}
+
+      {/* Up Next Queue */}
+      {showUpNext&&(
+        <UpNextQueueModal
+          queues={watchQueues}
+          allItems={queueItems}
+          watchedTodayLog={watchedTodayLog}
+          darkMode={darkMode}
+          onCreateQueue={createWatchQueue}
+          onRenameQueue={renameWatchQueue}
+          onSetActive={setActiveWatchQueue}
+          onDeleteQueue={deleteWatchQueue}
+          onReorder={reorderQueueItems}
+          onRemove={removeQueueItem}
+          onClear={clearQueueItems}
+          onCompleteItem={completeQueueItem}
+          onAddNextEpisode={(showRow,next)=>addNextEpisodeToQueue(showRow,next,getActiveQueue()?.id)}
+          onClose={()=>setShowUpNext(false)} />
       )}
 
       {/* Toast */}
