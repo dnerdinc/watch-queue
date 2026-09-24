@@ -1909,7 +1909,8 @@ export default function App() {
     clearTimeout(searchTimer.current);
     searchTimer.current=setTimeout(async()=>{
       try{
-        const params=new URLSearchParams({action:"query",list:"search",srsearch:addInput+" film",srlimit:"6",format:"json",origin:"*"});
+        const suffix = searchMode==="tv" ? " TV series" : " film";
+        const params=new URLSearchParams({action:"query",list:"search",srsearch:addInput+suffix,srlimit:"20",format:"json",origin:"*"});
         const res=await fetch(`https://en.wikipedia.org/w/api.php?${params}`);
         const data=await res.json();
         const titles=(data.query?.search||[]).map(r=>r.title);
@@ -1919,7 +1920,7 @@ export default function App() {
       }catch(_){setSearchResults([]);}
       setSearchLoading(false);
     },320);
-  },[addInput]);
+  },[addInput,searchMode]);
 
   async function addFromSearch(page){
     setAddInput("");setSearchOpen(false);
@@ -2158,7 +2159,7 @@ export default function App() {
                 style={{flex:1,background:"none",border:"none",outline:"none",color:FG,fontFamily:"'Georgia',serif",fontSize:"0.85rem",minWidth:0}} />
             </div>
             {searchOpen&&(
-              <div style={{position:"absolute",left:0,right:0,top:"calc(100% + 4px)",background:darkMode?"#131318":"#fff",border:"1px solid rgba(245,197,24,0.25)",borderRadius:6,zIndex:500,boxShadow:"0 12px 40px rgba(0,0,0,0.8)",maxHeight:280,overflowY:"auto"}}>
+              <div style={{position:"absolute",left:0,right:0,top:"calc(100% + 4px)",background:darkMode?"#131318":"#fff",border:"1px solid rgba(245,197,24,0.25)",borderRadius:6,zIndex:500,boxShadow:"0 12px 40px rgba(0,0,0,0.8)",maxHeight:440,overflowY:"auto"}}>
                 {searchLoading?(
                   <div style={{padding:14,textAlign:"center",fontFamily:"'Courier New',monospace",fontSize:"0.65rem",color:MUTED}}>
                     {[0,1,2].map(i=><span key={i} style={{display:"inline-block",width:4,height:4,borderRadius:"50%",background:"#f5c518",margin:"0 3px",animation:`dotpulse 1s ${i*0.15}s ease-in-out infinite`}} />)}
